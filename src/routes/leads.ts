@@ -1,7 +1,6 @@
 import { Router, Response } from 'express';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
-import toast from 'react-hot-toast';
 
 const router = Router();
 router.use(authenticate);
