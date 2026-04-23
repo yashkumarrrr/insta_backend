@@ -1,0 +1,176 @@
+import OpenAI from 'openai';
+import { logger } from '../utils/logger';
+
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+export interface AIReplyContext {
+  businessName?: string;
+  businessDescription?: string;
+  productDetails?: string;
+  targetAudience?: string;
+  goal: string;
+  tone: string;
+  customInstructions?: string;
+}
+
+export interface MessageContext {
+  incomingMessage: string;
+  source: 'dm' | 'comment';
+  igUsername: string;
+  conversationHistory?: Array<{ role: 'user' | 'assistant'; content: string }>;
+}
+
+const TONE_GUIDES: Record<string, string> = {
+  friendly: 'warm, casual, and approachable. Use conversational language, occasional emojis (not excessive). Feel like a helpful friend.',
+  professional: 'polished, respectful, and business-like. Clear and confident without being cold. No slang.',
+  aggressive: 'direct, bold, and action-oriented. Create urgency. No fluff. Short punchy messages.',
+  luxury: 'sophisticated, exclusive, and refined. Evoke prestige and quality. Use elegant language.',
+};
+
+const GOAL_GUIDES: Record<string, string> = {
+  engagement: 'Keep the conversation going. Ask interesting questions. Build rapport. Make them feel heard.',
+  leads: 'Qualify the person. Ask about their needs. Gently move toward scheduling a call or getting their email/number.',
+  sales: 'Understand their pain, present the solution, handle objections, and close. Create urgency without being pushy.',
+  followers: 'Be engaging and interesting. Encourage them to follow, share content, and stay connected.',
+};
+
+export async function generateAIReply(
+  context: AIReplyContext,
+  message: MessageContext
+): Promise<string> {
+  const toneGuide = TONE_GUIDES[context.tone] || TONE_GUIDES.friendly;
+  const goalGuide = GOAL_GUIDES[context.goal] || GOAL_GUIDES.engagement;
+
+  const systemPrompt = `You are a social media manager responding as a business owner on Instagram.
+
+BUSINESS CONTEXT:
+${context.businessName ? `Business Name: ${context.businessName}` : ''}
+${context.businessDescription ? `About: ${context.businessDescription}` : ''}
+${context.productDetails ? `Products/Services: ${context.productDetails}` : ''}
+${context.targetAudience ? `Target Audience: ${context.targetAudience}` : ''}
+
+YOUR TONE: ${toneGuide}
+
+YOUR GOAL: ${goalGuide}
+
+${context.customInstructions ? `ADDITIONAL INSTRUCTIONS: ${context.customInstructions}` : ''}
+
+CRITICAL RULES:
+- NEVER reveal you are an AI
+- Keep replies concise (1-3 sentences for DMs, 1-2 for comments)
+- Sound completely human and natural
+- Don't be generic — be specific to what they said
+- Don't use corporate buzzwords
+- End with a soft call-to-action or question when appropriate
+- Match the energy and language style of the person messaging you
+- If they use casual language, match that. If formal, match that.
+- Source context: This is a ${message.source === 'dm' ? 'direct message' : 'comment on a post'}`;
+
+  const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
+    { role: 'system', content: systemPrompt },
+  ];
+
+  // Add conversation history for context
+  if (message.conversationHistory?.length) {
+    const recentHistory = message.conversationHistory.slice(-6); // Last 6 messages
+    messages.push(...recentHistory.map(m => ({
+      role: m.role as 'user' | 'assistant',
+      content: m.content,
+    })));
+  }
+
+  messages.push({
+    role: 'user',
+    content: `${message.igUsername} sent: "${message.incomingMessage}"`,
+  });
+
+  const response = await openai.chat.completions.create({
+    model: 'gpt-4o',
+    messages,
+    max_tokens: 300,
+    temperature: 0.8,
+    presence_penalty: 0.3,
+    frequency_penalty: 0.3,
+  });
+
+  const reply = response.choices[0]?.message?.content?.trim();
+  if (!reply) throw new Error('Empty AI response');
+
+  logger.info('AI reply generated', {
+    goal: context.goal,
+    tone: context.tone,
+    source: message.source,
+    tokens: response.usage?.total_tokens,
+  });
+
+  return reply;
+}
+
+export async function generateCommentReply(
+  context: AIReplyContext,
+  comment: string,
+  igUsername: string,
+  postCaption?: string
+): Promise<string> {
+  const systemPrompt = `You are responding to a comment on your Instagram post as a business owner.
+
+BUSINESS: ${context.businessName || 'My Business'}
+${context.businessDescription ? `ABOUT: ${context.businessDescription}` : ''}
+TONE: ${TONE_GUIDES[context.tone] || TONE_GUIDES.friendly}
+GOAL: ${GOAL_GUIDES[context.goal] || GOAL_GUIDES.engagement}
+
+Rules:
+- Reply to comments publicly (these are visible to everyone)
+- Be concise (1-2 sentences max)
+- Sound human and natural
+- Use @${igUsername} to address them if appropriate
+- Encourage further engagement
+- NEVER reveal you are AI`;
+
+  const userPrompt = postCaption
+    ? `Post caption: "${postCaption}"\n\n@${igUsername} commented: "${comment}"`
+    : `@${igUsername} commented: "${comment}"`;
+
+  const response = await openai.chat.completions.create({
+    model: 'gpt-4o',
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt },
+    ],
+    max_tokens: 150,
+    temperature: 0.8,
+  });
+
+  const reply = response.choices[0]?.message?.content?.trim();
+  if (!reply) throw new Error('Empty AI response');
+  return reply;
+}
+
+export async function detectIntent(message: string): Promise<{
+  intent: 'purchase' | 'inquiry' | 'complaint' | 'compliment' | 'spam' | 'other';
+  isLead: boolean;
+  sentiment: 'positive' | 'neutral' | 'negative';
+}> {
+  const response = await openai.chat.completions.create({
+    model: 'gpt-4o-mini',
+    messages: [
+      {
+        role: 'system',
+        content: 'Analyze the intent of this Instagram message. Return JSON only.',
+      },
+      {
+        role: 'user',
+        content: `Message: "${message}"\n\nReturn: {"intent": "purchase|inquiry|complaint|compliment|spam|other", "isLead": true/false, "sentiment": "positive|neutral|negative"}`,
+      },
+    ],
+    max_tokens: 100,
+    temperature: 0.1,
+    response_format: { type: 'json_object' },
+  });
+
+  try {
+    return JSON.parse(response.choices[0]?.message?.content || '{}');
+  } catch {
+    return { intent: 'other', isLead: false, sentiment: 'neutral' };
+  }
+}

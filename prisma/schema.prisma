@@ -1,0 +1,191 @@
+// This is your Prisma schema file
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                String    @id @default(cuid())
+  email             String    @unique
+  password          String
+  name              String?
+  avatar            String?
+  trialStartedAt    DateTime  @default(now())
+  trialEndsAt       DateTime
+  isTrialActive     Boolean   @default(true)
+  stripeCustomerId  String?   @unique
+  stripeSubId       String?
+  subStatus         String?   @default("trialing")
+  subPlan           String?   @default("free")
+  resetToken        String?
+  resetTokenExpiry  DateTime?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  instagramAccount  InstagramAccount?
+  aiSettings        AISettings?
+  conversations     Conversation[]
+  leads             Lead[]
+  automationLogs    AutomationLog[]
+  billingEvents     BillingEvent[]
+
+  @@map("users")
+}
+
+model InstagramAccount {
+  id              String    @id @default(cuid())
+  userId          String    @unique
+  igUserId        String    @unique
+  username        String
+  accessToken     String    // encrypted
+  tokenExpiry     DateTime?
+  pageId          String?
+  pageToken       String?   // encrypted
+  isActive        Boolean   @default(true)
+  automationOn    Boolean   @default(false)
+  webhookVerified Boolean   @default(false)
+  followerCount   Int?
+  profilePicUrl   String?
+  connectedAt     DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("instagram_accounts")
+}
+
+model AISettings {
+  id                  String   @id @default(cuid())
+  userId              String   @unique
+  businessName        String?
+  businessDescription String?
+  productDetails      String?
+  targetAudience      String?
+  goal                String   @default("engagement") // engagement | leads | sales | followers
+  tone                String   @default("friendly")   // friendly | professional | aggressive | luxury
+  customInstructions  String?
+  replyToDMs          Boolean  @default(true)
+  replyToComments     Boolean  @default(true)
+  autoSendDMs         Boolean  @default(true)
+  maxDMsPerHour       Int      @default(20)
+  maxRepliesPerHour   Int      @default(30)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  user                User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("ai_settings")
+}
+
+model Conversation {
+  id              String    @id @default(cuid())
+  userId          String
+  igThreadId      String?   @unique
+  igUserId        String
+  igUsername      String?
+  igProfilePic    String?
+  source          String    @default("dm") // dm | comment
+  status          String    @default("active") // active | paused | closed
+  automationOn    Boolean   @default(true)
+  lastMessageAt   DateTime  @default(now())
+  messageCount    Int       @default(0)
+  aiMessageCount  Int       @default(0)
+  isLead          Boolean   @default(false)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages        Message[]
+  lead            Lead?
+
+  @@index([userId])
+  @@index([igUserId])
+  @@map("conversations")
+}
+
+model Message {
+  id              String    @id @default(cuid())
+  conversationId  String
+  igMessageId     String?   @unique
+  direction       String    // inbound | outbound
+  senderType      String    @default("user") // user | ai | human
+  content         String
+  mediaUrl        String?
+  mediaType       String?
+  isRead          Boolean   @default(false)
+  sentAt          DateTime  @default(now())
+  deliveredAt     DateTime?
+  failedAt        DateTime?
+  retryCount      Int       @default(0)
+  metadata        Json?
+
+  conversation    Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId])
+  @@map("messages")
+}
+
+model Lead {
+  id              String    @id @default(cuid())
+  userId          String
+  conversationId  String?   @unique
+  igUserId        String
+  igUsername      String?
+  igProfilePic    String?
+  name            String?
+  email           String?
+  phone           String?
+  notes           String?
+  status          String    @default("new") // new | contacted | qualified | converted | lost
+  source          String    @default("dm") // dm | comment
+  value           Float?
+  tags            String[]
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  user            User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  conversation    Conversation? @relation(fields: [conversationId], references: [id])
+
+  @@index([userId])
+  @@map("leads")
+}
+
+model AutomationLog {
+  id          String   @id @default(cuid())
+  userId      String
+  type        String   // webhook | ai_reply | dm_sent | error | rate_limit
+  status      String   @default("success") // success | failed | pending
+  source      String?  // comment | dm
+  igUserId    String?
+  messageId   String?
+  response    String?
+  error       String?
+  metadata    Json?
+  createdAt   DateTime @default(now())
+
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([createdAt])
+  @@map("automation_logs")
+}
+
+model BillingEvent {
+  id              String   @id @default(cuid())
+  userId          String
+  stripeEventId   String   @unique
+  type            String
+  status          String   @default("processed")
+  amount          Int?
+  currency        String?
+  metadata        Json?
+  createdAt       DateTime @default(now())
+
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("billing_events")
+}
