@@ -16,8 +16,6 @@ router.get('/auth-url', (req: AuthRequest, res: Response) => {
   'public_profile',
   'pages_show_list',
   'business_management',
-  'instagram_manage_messages',
-  'instagram_manage_comments',
   'pages_manage_metadata'
 ].join(' ');
 
