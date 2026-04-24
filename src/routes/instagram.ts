@@ -13,12 +13,12 @@ router.use(authenticate);
 router.get('/auth-url', (req: AuthRequest, res: Response) => {
   const redirectUri = `${process.env.BACKEND_URL}/api/instagram/callback`;
   const scopes = [
-    'instagram_basic',
-    'instagram_manage_messages',
-    'instagram_manage_comments',
-    'pages_show_list',
-    'pages_read_engagement',
-  ].join(',');
+  'instagram_basic',
+  'instagram_content_publish',
+  'pages_show_list',
+  'pages_read_engagement',
+  'business_management',
+].join(',');
 
   const url = `https://www.facebook.com/v18.0/dialog/oauth?client_id=${process.env.META_APP_ID}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${scopes}&response_type=code&state=${req.user!.id}`;
 
