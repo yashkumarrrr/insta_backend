@@ -20,6 +20,7 @@ import conversationRoutes from './routes/conversations';
 import leadsRoutes from './routes/leads';
 
 const app = express();
+app.set('trust proxy', 1);
 const PORT = process.env.PORT || 4000;
 
 // Security
