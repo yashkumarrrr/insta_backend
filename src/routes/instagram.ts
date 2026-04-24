@@ -19,7 +19,7 @@ router.get('/auth-url', (req: AuthRequest, res: Response) => {
   'instagram_manage_messages',
   'instagram_manage_comments',
   'pages_manage_metadata'
-].join(',');;
+].join(' ');;
 
   const url = `https://www.facebook.com/v18.0/dialog/oauth?client_id=${process.env.META_APP_ID}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${scopes}&response_type=code&state=${req.user!.id}`;
 
