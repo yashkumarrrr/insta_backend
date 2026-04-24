@@ -68,6 +68,10 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+app.get('/auth/meta/callback', (req, res) => {
+  res.send('Meta callback working');
+});
+
 // 404
 app.use('*', (req, res) => {
   res.status(404).json({ error: 'Route not found' });
