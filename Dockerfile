@@ -1,17 +1,19 @@
-FROM node:20
+FROM node:18-alpine
 
-RUN apt-get update && apt-get install -y openssl
+RUN apk add --no-cache openssl
 
 WORKDIR /app
 
 COPY package*.json ./
-
 RUN npm install
 
 COPY . .
 
 RUN npx prisma generate
+RUN npm run build
 
-EXPOSE 3000
+RUN mkdir -p logs
 
-CMD ["npm", "start"]
+EXPOSE 4000
+
+CMD ["sh", "-c", "npx prisma migrate deploy && node dist/src/index.js"]
