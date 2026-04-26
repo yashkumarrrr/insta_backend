@@ -1,217 +1,326 @@
-import axios from 'axios';
+import { Router, Response, Request } from 'express';
+import { authenticate, requireActiveSubscription, AuthRequest } from '../middleware/auth';
+import { prisma } from '../utils/prisma';
+import { InstagramService, exchangeCodeForToken, getLongLivedToken } from '../services/instagram';
+import { encrypt, decrypt } from '../utils/encryption';
 import { logger } from '../utils/logger';
+import rateLimit from 'express-rate-limit';
+import crypto from 'crypto';
 
-const BASE_URL = 'https://graph.facebook.com/v21.0';  // ✅ Fixed closing quote
+const router = Router();
 
-export interface IGMessage {
-  id: string;
-  message: string;
-  from: { id: string; username?: string };
-  created_time: string;
-}
+// ─── RATE LIMITERS ────────────────────────────────────────────────────────────
+const authRateLimit = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 10,
+  message: { error: 'Too many auth attempts. Try again in 1 hour.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.ip || 'unknown',
+});
 
-export interface IGConversation {
-  id: string;
-  messages: { data: IGMessage[] };
-  participants: { data: Array<{ id: string; username?: string }> };
-}
+const apiRateLimit = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  message: { error: 'Too many requests. Slow down.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req: any) => req.user?.id || req.ip || 'unknown',
+});
 
-export class InstagramService {
-  private accessToken: string;
-  private igUserId: string;
+const strictRateLimit = rateLimit({
+  windowMs: 60 * 1000,
+  max: 5,
+  message: { error: 'Too many requests for this action.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req: any) => req.user?.id || req.ip || 'unknown',
+});
 
-  constructor(accessToken: string, igUserId: string) {
-    if (!accessToken) throw new Error('Missing accessToken');
-    if (!igUserId) throw new Error('Missing igUserId (this is required)');
-    this.accessToken = accessToken;
-    this.igUserId = igUserId;
+// ─── CSRF STATE MAP ───────────────────────────────────────────────────────────
+const validStates = new Map<string, { userId: string; expiresAt: number }>();
+
+const generateState = (userId: string): string => {
+  const state = crypto.randomBytes(32).toString('hex');
+  validStates.set(state, {
+    userId,
+    expiresAt: Date.now() + 10 * 60 * 1000,
+  });
+  return state;
+};
+
+const validateState = (state: string): string | null => {
+  const entry = validStates.get(state);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) {
+    validStates.delete(state);
+    return null;
+  }
+  validStates.delete(state);
+  return entry.userId;
+};
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, val] of validStates.entries()) {
+    if (now > val.expiresAt) validStates.delete(key);
+  }
+}, 15 * 60 * 1000);
+
+// ─── GET /api/instagram/auth ──────────────────────────────────────────────────
+router.get(
+  '/auth',
+  authRateLimit,
+  authenticate,
+  (req: AuthRequest, res: Response) => {
+    const redirectUri = `${process.env.BACKEND_URL}/api/instagram/callback`;
+    const state = generateState(req.user!.id);
+
+    // ✅ FIXED: added instagram_manage_messages, updated to v21.0
+    const scopes = [
+      'public_profile',
+      'pages_show_list',
+      'pages_read_engagement',
+      'instagram_basic',
+      'instagram_manage_comments',
+      'instagram_manage_messages',
+    ].join(',');
+
+    const url =
+      `https://www.facebook.com/v21.0/dialog/oauth` +
+      `?client_id=${process.env.META_APP_ID}` +
+      `&redirect_uri=${encodeURIComponent(redirectUri)}` +
+      `&scope=${scopes}` +
+      `&response_type=code` +
+      `&state=${state}`;
+
+    logger.info(`Instagram OAuth initiated for user ${req.user!.id}`);
+    res.redirect(url);
+  }
+);
+
+// ─── GET /api/instagram/auth-url ─────────────────────────────────────────────
+router.get(
+  '/auth-url',
+  authRateLimit,
+  authenticate,
+  (req: AuthRequest, res: Response) => {
+    const redirectUri = `${process.env.BACKEND_URL}/api/instagram/callback`;
+    const state = generateState(req.user!.id);
+
+    // ✅ FIXED: added instagram_manage_messages, updated to v21.0
+    const scopes = [
+      'public_profile',
+      'pages_show_list',
+      'pages_read_engagement',
+      'instagram_basic',
+      'instagram_manage_comments',
+      'instagram_manage_messages',
+    ].join(',');
+
+    const url =
+      `https://www.facebook.com/v21.0/dialog/oauth` +
+      `?client_id=${process.env.META_APP_ID}` +
+      `&redirect_uri=${encodeURIComponent(redirectUri)}` +
+      `&scope=${scopes}` +
+      `&response_type=code` +
+      `&state=${state}`;
+
+    res.json({ url });
+  }
+);
+
+// ─── GET /api/instagram/callback ─────────────────────────────────────────────
+router.get('/callback', authRateLimit, async (req: Request, res: Response) => {
+  const { code, state, error, error_description } = req.query as Record<string, string>;
+
+  if (error) {
+    logger.warn(`Instagram OAuth denied: ${error} - ${error_description}`);
+    return res.redirect(
+      `${process.env.FRONTEND_URL}/dashboard/instagram?error=access_denied`
+    );
   }
 
-  // ─── GET REQUEST ─────────────────────────────────────────────────────────
-  private async get(endpoint: string, params: Record<string, any> = {}) {
-    try {
-      const response = await axios.get(`${BASE_URL}/${endpoint}`, {
-        params: { access_token: this.accessToken, ...params },
-      });
-      return response.data;
-    } catch (error: any) {
-      logger.error('GET request failed', error.response?.data || error.message);
-      throw error;
-    }
+  if (!code || !state) {
+    logger.warn('Instagram callback: missing code or state');
+    return res.redirect(
+      `${process.env.FRONTEND_URL}/dashboard/instagram?error=invalid_request`
+    );
   }
 
-  // ─── POST REQUEST (FIXED) ────────────────────────────────────────────────
-  // Token in params, data as JSON body — required for DM and comment endpoints
-  private async post(endpoint: string, data: Record<string, any> = {}) {
-    try {
-      const response = await axios.post(
-        `${BASE_URL}/${endpoint}`,
-        data,                                          // ✅ JSON body
-        { params: { access_token: this.accessToken } } // ✅ token in params
-      );
-      return response.data;
-    } catch (error: any) {
-      logger.error('POST request failed', error.response?.data || error.message);
-      throw error;
-    }
+  const userId = validateState(state);
+  if (!userId) {
+    logger.warn(`Instagram callback: invalid or expired state ${state}`);
+    return res.redirect(
+      `${process.env.FRONTEND_URL}/dashboard/instagram?error=invalid_state`
+    );
   }
 
-  // ─── SEND DM ─────────────────────────────────────────────────────────────
-  async sendDM(recipientId: string, message: string) {
-    try {
-      const data = await this.post(`${this.igUserId}/messages`, {
-        recipient: { id: recipientId },
-        message: { text: message },
-      });
-      logger.info('DM sent', { recipientId, messageId: data.message_id });
-      return data;
-    } catch (error: any) {
-      logger.error('Failed to send DM', error.response?.data || error.message);
-      throw new Error(error.response?.data?.error?.message || 'Failed to send DM');
-    }
+  const user = await prisma.user.findUnique({ where: { id: userId } });
+  if (!user) {
+    logger.warn(`Instagram callback: user not found ${userId}`);
+    return res.redirect(
+      `${process.env.FRONTEND_URL}/dashboard/instagram?error=user_not_found`
+    );
   }
 
-  // ─── REPLY TO COMMENT ────────────────────────────────────────────────────
-  async replyToComment(commentId: string, message: string) {
-    try {
-      return await this.post(`${commentId}/replies`, { message });
-    } catch (error: any) {
-      logger.error('Failed to reply to comment', error.response?.data);
-      throw new Error(error.response?.data?.error?.message || 'Failed to reply');
-    }
-  }
+  try {
+    const redirectUri = `${process.env.BACKEND_URL}/api/instagram/callback`;
 
-  // ─── GET CONVERSATIONS ──────────────────────────────────────────────────
-  async getConversations(limit = 20): Promise<IGConversation[]> {
-    try {
-      const data = await this.get(`${this.igUserId}/conversations`, {
-        fields: 'id,messages{message,from,created_time},participants',
-        limit,
-      });
-      return data?.data ?? [];
-    } catch (error: any) {
-      logger.error('Failed to get conversations', error.response?.data);
-      return [];
-    }
-  }
+    // ✅ FIXED: exchangeCodeForToken now fetches user_id from /me endpoint
+    const { access_token: shortToken, user_id } = await exchangeCodeForToken(code, redirectUri);
+    const { access_token, expires_in } = await getLongLivedToken(shortToken);
 
-  // ─── GET MESSAGES ────────────────────────────────────────────────────────
-  async getMessages(conversationId: string, limit = 50) {
-    try {
-      const data = await this.get(`${conversationId}/messages`, {
-        fields: 'id,message,from,created_time,attachments',
-        limit,
-      });
-      return data?.data ?? [];
-    } catch (error: any) {
-      logger.error('Failed to get messages', error.response?.data);
-      return [];
-    }
-  }
+    const igService = new InstagramService(access_token, user_id);
+    const accountInfo = await igService.getAccountInfo();
 
-  // ─── GET COMMENTS ───────────────────────────────────────────────────────
-  async getMediaComments(mediaId: string) {
-    try {
-      const data = await this.get(`${mediaId}/comments`, {
-        fields: 'id,text,username,timestamp,from',
-        limit: 50,
-      });
-      return data?.data ?? [];
-    } catch (error: any) {
-      logger.error('Failed to get comments', error.response?.data);
-      return [];
-    }
-  }
+    const tokenExpiry = new Date(Date.now() + expires_in * 1000);
 
-  // ─── GET MEDIA ───────────────────────────────────────────────────────────
-  async getUserMedia(limit = 10) {
-    try {
-      const data = await this.get(`${this.igUserId}/media`, {
-        fields: 'id,caption,media_type,timestamp,comments_count,like_count',
-        limit,
-      });
-      return data?.data ?? [];
-    } catch (error: any) {
-      logger.error('Failed to get media', error.response?.data);
-      return [];
-    }
-  }
+    await prisma.instagramAccount.upsert({
+      where: { userId },
+      create: {
+        userId,
+        igUserId: user_id,
+        username: accountInfo.username,
+        accessToken: encrypt(access_token),
+        tokenExpiry,
+        profilePicUrl: accountInfo.profile_picture_url ?? null,   // ✅ null safe
+        followerCount: accountInfo.followers_count ?? null,        // ✅ null safe
+        isActive: true,
+      },
+      update: {
+        igUserId: user_id,
+        username: accountInfo.username,
+        accessToken: encrypt(access_token),
+        tokenExpiry,
+        profilePicUrl: accountInfo.profile_picture_url ?? null,   // ✅ null safe
+        followerCount: accountInfo.followers_count ?? null,        // ✅ null safe
+        isActive: true,
+      },
+    });
 
-  // ─── ACCOUNT INFO ────────────────────────────────────────────────────────
-  async getAccountInfo() {
-    try {
-      return await this.get(this.igUserId, {
-        fields: 'id,username,name,profile_picture_url,followers_count,media_count,biography',
-      });
-    } catch (error: any) {
-      logger.error('Failed to get account info', error.response?.data);
-      throw error;
-    }
+    logger.info(`Instagram connected for user ${userId} (@${accountInfo.username})`);
+    res.redirect(`${process.env.FRONTEND_URL}/dashboard/instagram?success=true`);
+  } catch (err) {
+    logger.error('Instagram OAuth error:', err);
+    res.redirect(
+      `${process.env.FRONTEND_URL}/dashboard/instagram?error=auth_failed`
+    );
   }
+});
 
-  // ─── SUBSCRIBE WEBHOOKS ──────────────────────────────────────────────────
-  async subscribeToWebhooks(pageId: string, pageToken: string) {
+// ─── GET /api/instagram/status ────────────────────────────────────────────────
+router.get(
+  '/status',
+  apiRateLimit,
+  authenticate,
+  async (req: AuthRequest, res: Response) => {
     try {
-      await axios.post(`${BASE_URL}/${pageId}/subscribed_apps`, null, {
-        params: {
-          access_token: pageToken,
-          subscribed_fields: 'messages,comments,messaging_postbacks',
+      const account = await prisma.instagramAccount.findUnique({
+        where: { userId: req.user!.id },
+        select: {
+          id: true,
+          username: true,
+          isActive: true,
+          automationOn: true,
+          followerCount: true,
+          profilePicUrl: true,
+          connectedAt: true,
+          webhookVerified: true,
         },
       });
-      return true;
-    } catch (error: any) {
-      logger.error('Webhook subscribe failed', error.response?.data);
-      return false;
+      res.json({ connected: !!account, account });
+    } catch (err) {
+      logger.error('Error fetching status:', err);
+      res.status(500).json({ error: 'Failed to fetch status' });
     }
   }
-}
+);
 
-// ─── OAUTH: EXCHANGE CODE ──────────────────────────────────────────────────
-// ✅ FIXED: Facebook does NOT return user_id in token exchange
-// We fetch it separately via /me endpoint
-export async function exchangeCodeForToken(code: string, redirectUri: string) {
-  try {
-    // Step 1 — exchange code for access token
-    const tokenRes = await axios.get(`${BASE_URL}/oauth/access_token`, {
-      params: {
-        client_id: process.env.META_APP_ID,
-        client_secret: process.env.META_APP_SECRET,
-        redirect_uri: redirectUri,
-        code,
-      },
-    });
+// ─── POST /api/instagram/toggle-automation ────────────────────────────────────
+router.post(
+  '/toggle-automation',
+  strictRateLimit,
+  authenticate,
+  requireActiveSubscription,
+  async (req: AuthRequest, res: Response) => {
+    const { enabled } = req.body;
 
-    const access_token = tokenRes.data.access_token;
+    if (typeof enabled !== 'boolean') {
+      return res.status(400).json({ error: 'enabled must be a boolean' });
+    }
 
-    // Step 2 — fetch user ID separately (not included in token response)
-    const meRes = await axios.get(`${BASE_URL}/me`, {
-      params: { access_token, fields: 'id' },
-    });
+    try {
+      const account = await prisma.instagramAccount.findUnique({
+        where: { userId: req.user!.id },
+      });
 
-    return {
-      access_token,
-      user_id: meRes.data.id,
-    };
-  } catch (error: any) {
-    logger.error('OAuth token exchange failed', error.response?.data);
-    throw error;
+      if (!account) {
+        return res.status(404).json({ error: 'No Instagram account connected' });
+      }
+
+      const updated = await prisma.instagramAccount.update({
+        where: { userId: req.user!.id },
+        data: { automationOn: enabled },
+      });
+
+      logger.info(`Automation ${enabled ? 'ON' : 'OFF'} for user ${req.user!.id}`);
+      res.json({ automationOn: updated.automationOn });
+    } catch (err) {
+      logger.error('Error toggling automation:', err);
+      res.status(500).json({ error: 'Failed to toggle automation' });
+    }
   }
-}
+);
 
-// ─── LONG LIVED TOKEN ──────────────────────────────────────────────────────
-export async function getLongLivedToken(shortToken: string) {
-  try {
-    const response = await axios.get(`${BASE_URL}/oauth/access_token`, {
-      params: {
-        grant_type: 'fb_exchange_token',
-        client_id: process.env.META_APP_ID,
-        client_secret: process.env.META_APP_SECRET,
-        fb_exchange_token: shortToken,
-      },
-    });
-    return response.data;
-  } catch (error: any) {
-    logger.error('Long-lived token failed', error.response?.data);
-    throw error;
+// ─── DELETE /api/instagram/disconnect ────────────────────────────────────────
+router.delete(
+  '/disconnect',
+  strictRateLimit,
+  authenticate,
+  async (req: AuthRequest, res: Response) => {
+    try {
+      await prisma.instagramAccount.deleteMany({
+        where: { userId: req.user!.id },
+      });
+      logger.info(`Instagram disconnected for user ${req.user!.id}`);
+      res.json({ message: 'Instagram account disconnected' });
+    } catch (err) {
+      logger.error('Error disconnecting:', err);
+      res.status(500).json({ error: 'Failed to disconnect' });
+    }
   }
-}
+);
+
+// ─── GET /api/instagram/media ─────────────────────────────────────────────────
+router.get(
+  '/media',
+  apiRateLimit,
+  authenticate,
+  requireActiveSubscription,
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const account = await prisma.instagramAccount.findUnique({
+        where: { userId: req.user!.id },
+      });
+
+      if (!account?.accessToken) {
+        return res.status(404).json({ error: 'No Instagram account connected' });
+      }
+
+      if (account.tokenExpiry && new Date() > account.tokenExpiry) {
+        return res.status(401).json({ error: 'Token expired. Please reconnect Instagram.' });
+      }
+
+      const token = decrypt(account.accessToken);
+      const igService = new InstagramService(token, account.igUserId);
+      const media = await igService.getUserMedia(10);
+      res.json(media);
+    } catch (err) {
+      logger.error('Error fetching media:', err);
+      res.status(500).json({ error: 'Failed to fetch media' });
+    }
+  }
+);
+
+export default router;
