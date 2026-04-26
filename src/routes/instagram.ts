@@ -4,80 +4,186 @@ import { prisma } from '../utils/prisma';
 import { InstagramService, exchangeCodeForToken, getLongLivedToken } from '../services/instagram';
 import { encrypt, decrypt } from '../utils/encryption';
 import { logger } from '../utils/logger';
+import rateLimit from 'express-rate-limit';
+import crypto from 'crypto';
 
 const router = Router();
 
-// ✅ NO global authenticate — applied per route below
+// ─── RATE LIMITERS ────────────────────────────────────────────────────────────
+
+// Auth attempts — 10 per hour per IP
+const authRateLimit = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 10,
+  message: { error: 'Too many auth attempts. Try again in 1 hour.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.ip || 'unknown',
+});
+
+// API calls — 60 per minute per user
+const apiRateLimit = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  message: { error: 'Too many requests. Slow down.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req: any) => req.user?.id || req.ip || 'unknown',
+});
+
+// Strict limit for sensitive actions — 5 per minute
+const strictRateLimit = rateLimit({
+  windowMs: 60 * 1000,
+  max: 5,
+  message: { error: 'Too many requests for this action.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req: any) => req.user?.id || req.ip || 'unknown',
+});
+
+// ─── CSRF STATE MAP ───────────────────────────────────────────────────────────
+// Stores one-time states for 10 minutes to prevent CSRF attacks
+const validStates = new Map<string, { userId: string; expiresAt: number }>();
+
+const generateState = (userId: string): string => {
+  const state = crypto.randomBytes(32).toString('hex');
+  validStates.set(state, {
+    userId,
+    expiresAt: Date.now() + 10 * 60 * 1000,
+  });
+  return state;
+};
+
+const validateState = (state: string): string | null => {
+  const entry = validStates.get(state);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) {
+    validStates.delete(state);
+    return null;
+  }
+  validStates.delete(state); // one-time use only
+  return entry.userId;
+};
+
+// Clean expired states every 15 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, val] of validStates.entries()) {
+    if (now > val.expiresAt) validStates.delete(key);
+  }
+}, 15 * 60 * 1000);
 
 // ─── GET /api/instagram/auth ──────────────────────────────────────────────────
-// PUBLIC — redirects browser directly to Facebook OAuth
-// Called from frontend: window.location.href = '/api/instagram/auth'
-router.get('/auth', authenticate, (req: AuthRequest, res: Response) => {
-  const redirectUri = `${process.env.BACKEND_URL}/api/instagram/callback`;
+// Requires login + rate limited
+// Redirects browser directly to Facebook OAuth
+router.get(
+  '/auth',
+  authRateLimit,
+  authenticate,
+  (req: AuthRequest, res: Response) => {
+    const redirectUri = `${process.env.BACKEND_URL}/api/instagram/callback`;
+    const state = generateState(req.user!.id);
 
-  const scopes = [
-    'public_profile',
-    'pages_show_list',
-    'pages_read_engagement',
-    'instagram_basic',
-    'instagram_manage_comments',
-  ].join(',');
+    const scopes = [
+      'public_profile',
+      'pages_show_list',
+      'pages_read_engagement',
+      'instagram_basic',
+      'instagram_manage_comments',
+    ].join(',');
 
-  const url = `https://www.facebook.com/v18.0/dialog/oauth?client_id=${process.env.META_APP_ID}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${scopes}&response_type=code&state=${req.user!.id}`;
+    const url =
+      `https://www.facebook.com/v18.0/dialog/oauth` +
+      `?client_id=${process.env.META_APP_ID}` +
+      `&redirect_uri=${encodeURIComponent(redirectUri)}` +
+      `&scope=${scopes}` +
+      `&response_type=code` +
+      `&state=${state}`;
 
-  // Redirect browser directly to Facebook
-  res.redirect(url);
-});
+    logger.info(`Instagram OAuth initiated for user ${req.user!.id}`);
+    res.redirect(url);
+  }
+);
 
 // ─── GET /api/instagram/auth-url ─────────────────────────────────────────────
-// Returns JSON URL (for frontend to open in same tab or popup)
-router.get('/auth-url', authenticate, (req: AuthRequest, res: Response) => {
-  const redirectUri = `${process.env.BACKEND_URL}/api/instagram/callback`;
+// Returns JSON URL for frontend to open
+router.get(
+  '/auth-url',
+  authRateLimit,
+  authenticate,
+  (req: AuthRequest, res: Response) => {
+    const redirectUri = `${process.env.BACKEND_URL}/api/instagram/callback`;
+    const state = generateState(req.user!.id);
 
-  const scopes = [
-    'public_profile',
-    'pages_show_list',
-    'pages_read_engagement',
-    'instagram_basic',
-    'instagram_manage_comments',
-  ].join(',');
+    const scopes = [
+      'public_profile',
+      'pages_show_list',
+      'pages_read_engagement',
+      'instagram_basic',
+      'instagram_manage_comments',
+    ].join(',');
 
-  const url = `https://www.facebook.com/v18.0/dialog/oauth?client_id=${process.env.META_APP_ID}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${scopes}&response_type=code&state=${req.user!.id}`;
+    const url =
+      `https://www.facebook.com/v18.0/dialog/oauth` +
+      `?client_id=${process.env.META_APP_ID}` +
+      `&redirect_uri=${encodeURIComponent(redirectUri)}` +
+      `&scope=${scopes}` +
+      `&response_type=code` +
+      `&state=${state}`;
 
-  res.json({ url });
-});
+    res.json({ url });
+  }
+);
 
 // ─── GET /api/instagram/callback ─────────────────────────────────────────────
-// PUBLIC — Facebook redirects here after user approves
-// No authenticate middleware — Facebook calls this directly
-router.get('/callback', async (req: Request, res: Response) => {
-  const { code, state: userId, error } = req.query as Record<string, string>;
+// PUBLIC — Facebook redirects here after OAuth
+// Security: protected by CSRF state validation (no JWT — Facebook calls this)
+router.get('/callback', authRateLimit, async (req: Request, res: Response) => {
+  const { code, state, error, error_description } = req.query as Record<string, string>;
 
   if (error) {
-    logger.error('Instagram OAuth denied:', error);
-    return res.redirect(`${process.env.FRONTEND_URL}/dashboard/instagram?error=access_denied`);
+    logger.warn(`Instagram OAuth denied: ${error} - ${error_description}`);
+    return res.redirect(
+      `${process.env.FRONTEND_URL}/dashboard/instagram?error=access_denied`
+    );
   }
 
-  if (!code || !userId) {
-    return res.redirect(`${process.env.FRONTEND_URL}/dashboard/instagram?error=missing_params`);
+  if (!code || !state) {
+    logger.warn('Instagram callback: missing code or state');
+    return res.redirect(
+      `${process.env.FRONTEND_URL}/dashboard/instagram?error=invalid_request`
+    );
+  }
+
+  // Validate CSRF state — resolves to userId
+  const userId = validateState(state);
+  if (!userId) {
+    logger.warn(`Instagram callback: invalid or expired state ${state}`);
+    return res.redirect(
+      `${process.env.FRONTEND_URL}/dashboard/instagram?error=invalid_state`
+    );
+  }
+
+  // Verify user still exists in DB
+  const user = await prisma.user.findUnique({ where: { id: userId } });
+  if (!user) {
+    logger.warn(`Instagram callback: user not found ${userId}`);
+    return res.redirect(
+      `${process.env.FRONTEND_URL}/dashboard/instagram?error=user_not_found`
+    );
   }
 
   try {
     const redirectUri = `${process.env.BACKEND_URL}/api/instagram/callback`;
 
-    // Exchange code for short-lived token
     const { access_token: shortToken, user_id } = await exchangeCodeForToken(code, redirectUri);
-
-    // Exchange for long-lived token
     const { access_token, expires_in } = await getLongLivedToken(shortToken);
 
-    // Get Instagram account info
     const igService = new InstagramService(access_token, user_id);
     const accountInfo = await igService.getAccountInfo();
 
     const tokenExpiry = new Date(Date.now() + expires_in * 1000);
 
-    // Save to database
     await prisma.instagramAccount.upsert({
       where: { userId },
       create: {
@@ -101,79 +207,128 @@ router.get('/callback', async (req: Request, res: Response) => {
       },
     });
 
-    logger.info(`Instagram connected for user ${userId}`);
+    logger.info(`Instagram connected for user ${userId} (@${accountInfo.username})`);
     res.redirect(`${process.env.FRONTEND_URL}/dashboard/instagram?success=true`);
   } catch (err) {
     logger.error('Instagram OAuth error:', err);
-    res.redirect(`${process.env.FRONTEND_URL}/dashboard/instagram?error=auth_failed`);
+    res.redirect(
+      `${process.env.FRONTEND_URL}/dashboard/instagram?error=auth_failed`
+    );
   }
 });
 
 // ─── GET /api/instagram/status ────────────────────────────────────────────────
-router.get('/status', authenticate, async (req: AuthRequest, res: Response) => {
-  const account = await prisma.instagramAccount.findUnique({
-    where: { userId: req.user!.id },
-    select: {
-      id: true,
-      username: true,
-      isActive: true,
-      automationOn: true,
-      followerCount: true,
-      profilePicUrl: true,
-      connectedAt: true,
-      webhookVerified: true,
-    },
-  });
-  res.json({ connected: !!account, account });
-});
+router.get(
+  '/status',
+  apiRateLimit,
+  authenticate,
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const account = await prisma.instagramAccount.findUnique({
+        where: { userId: req.user!.id },
+        select: {
+          id: true,
+          username: true,
+          isActive: true,
+          automationOn: true,
+          followerCount: true,
+          profilePicUrl: true,
+          connectedAt: true,
+          webhookVerified: true,
+        },
+      });
+      res.json({ connected: !!account, account });
+    } catch (err) {
+      logger.error('Error fetching status:', err);
+      res.status(500).json({ error: 'Failed to fetch status' });
+    }
+  }
+);
 
 // ─── POST /api/instagram/toggle-automation ────────────────────────────────────
-router.post('/toggle-automation', authenticate, requireActiveSubscription, async (req: AuthRequest, res: Response) => {
-  const { enabled } = req.body;
+router.post(
+  '/toggle-automation',
+  strictRateLimit,
+  authenticate,
+  requireActiveSubscription,
+  async (req: AuthRequest, res: Response) => {
+    const { enabled } = req.body;
 
-  const account = await prisma.instagramAccount.findUnique({
-    where: { userId: req.user!.id },
-  });
+    if (typeof enabled !== 'boolean') {
+      return res.status(400).json({ error: 'enabled must be a boolean' });
+    }
 
-  if (!account) {
-    return res.status(404).json({ error: 'No Instagram account connected' });
+    try {
+      const account = await prisma.instagramAccount.findUnique({
+        where: { userId: req.user!.id },
+      });
+
+      if (!account) {
+        return res.status(404).json({ error: 'No Instagram account connected' });
+      }
+
+      const updated = await prisma.instagramAccount.update({
+        where: { userId: req.user!.id },
+        data: { automationOn: enabled },
+      });
+
+      logger.info(`Automation ${enabled ? 'ON' : 'OFF'} for user ${req.user!.id}`);
+      res.json({ automationOn: updated.automationOn });
+    } catch (err) {
+      logger.error('Error toggling automation:', err);
+      res.status(500).json({ error: 'Failed to toggle automation' });
+    }
   }
-
-  const updated = await prisma.instagramAccount.update({
-    where: { userId: req.user!.id },
-    data: { automationOn: enabled },
-  });
-
-  logger.info(`Automation ${enabled ? 'enabled' : 'disabled'} for user ${req.user!.id}`);
-  res.json({ automationOn: updated.automationOn });
-});
+);
 
 // ─── DELETE /api/instagram/disconnect ────────────────────────────────────────
-router.delete('/disconnect', authenticate, async (req: AuthRequest, res: Response) => {
-  await prisma.instagramAccount.deleteMany({
-    where: { userId: req.user!.id },
-  });
-  res.json({ message: 'Instagram account disconnected' });
-});
+router.delete(
+  '/disconnect',
+  strictRateLimit,
+  authenticate,
+  async (req: AuthRequest, res: Response) => {
+    try {
+      await prisma.instagramAccount.deleteMany({
+        where: { userId: req.user!.id },
+      });
+      logger.info(`Instagram disconnected for user ${req.user!.id}`);
+      res.json({ message: 'Instagram account disconnected' });
+    } catch (err) {
+      logger.error('Error disconnecting:', err);
+      res.status(500).json({ error: 'Failed to disconnect' });
+    }
+  }
+);
 
 // ─── GET /api/instagram/media ─────────────────────────────────────────────────
-router.get('/media', authenticate, requireActiveSubscription, async (req: AuthRequest, res: Response) => {
-  const account = await prisma.instagramAccount.findUnique({
-    where: { userId: req.user!.id },
-  });
+router.get(
+  '/media',
+  apiRateLimit,
+  authenticate,
+  requireActiveSubscription,
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const account = await prisma.instagramAccount.findUnique({
+        where: { userId: req.user!.id },
+      });
 
-  if (!account?.accessToken) {
-    return res.status(404).json({ error: 'No Instagram account connected' });
-  }
+      if (!account?.accessToken) {
+        return res.status(404).json({ error: 'No Instagram account connected' });
+      }
 
-  try {
-    const token = decrypt(account.accessToken);
-    const igService = new InstagramService(token, account.igUserId);
-    const media = await igService.getUserMedia(10);
-    res.json(media);
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to fetch media' });
+      if (account.tokenExpiry && new Date() > account.tokenExpiry) {
+        return res.status(401).json({ error: 'Token expired. Please reconnect Instagram.' });
+      }
+
+      const token = decrypt(account.accessToken);
+      const igService = new InstagramService(token, account.igUserId);
+      const media = await igService.getUserMedia(10);
+      res.json(media);
+    } catch (err) {
+      logger.error('Error fetching media:', err);
+      res.status(500).json({ error: 'Failed to fetch media' });
+    }
   }
-});
+);
 
 export default router;
