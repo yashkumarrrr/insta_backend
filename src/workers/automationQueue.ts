@@ -50,8 +50,9 @@ automationQueue.process('process-dm', 5, async (job) => {
 
   try {
     // Get user's IG account and AI settings
-    const [igAccount] = await Promise.all([
-  prisma.instagramAccount.findUnique({ where: { id: igAccountId } }),
+    const [igAccount, aiSettings] = await Promise.all([
+      prisma.instagramAccount.findUnique({ where: { userId } }),
+      prisma.aISettings.findUnique({ where: { userId } }),
     ]);
 
     if (!igAccount?.accessToken || !igAccount.automationOn) {
