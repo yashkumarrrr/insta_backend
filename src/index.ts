@@ -11,6 +11,7 @@ dotenv.config();
 import { logger } from './utils/logger';
 import { prisma } from './utils/prisma';
 import authRoutes from './routes/auth';
+import instagramRoutes from './routes/instagram'; // ✅ restored
 import aiRoutes from './routes/ai';
 import webhookRoutes from './routes/webhook';
 import billingRoutes from './routes/billing';
@@ -54,6 +55,7 @@ app.use('/api/', globalLimiter);
 
 // Routes
 app.use('/api/auth', authRoutes);
+app.use('/api/instagram', instagramRoutes); // ✅ restored
 app.use('/api/ai', aiRoutes);
 app.use('/api/webhook', webhookRoutes);
 app.use('/api/billing', billingRoutes);
