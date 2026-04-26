@@ -123,11 +123,11 @@ router.post('/login',
       const refreshToken = signRefreshToken({ userId: user.id, email: user.email });
 
       res.cookie('refresh_token', refreshToken, {
-        httpOnly: true,
-        secure: process.env.NODE_ENV === 'production',
-        sameSite: 'strict',
-        maxAge: 7 * 24 * 60 * 60 * 1000,
-      });
+  httpOnly: true,
+  secure: true,  // must be true when sameSite is none
+  sameSite: 'none',  // ← required for cross-domain
+  maxAge: 7 * 24 * 60 * 60 * 1000,
+});
 
       const { password: _, ...safeUser } = user;
       res.json({ user: safeUser, accessToken });
