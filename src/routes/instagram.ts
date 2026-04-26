@@ -1,4 +1,4 @@
-import { Router, Response } from 'express';
+import { Router, Response, Request } from 'express';
 import { authenticate, requireActiveSubscription, AuthRequest } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
 import { InstagramService, exchangeCodeForToken, getLongLivedToken } from '../services/instagram';
@@ -7,17 +7,40 @@ import { logger } from '../utils/logger';
 
 const router = Router();
 
-router.use(authenticate);
+// ✅ NO global authenticate — applied per route below
 
-// ─── GET /api/instagram/auth-url ──────────────────────────────────────────────
-router.get('/auth-url', (req: AuthRequest, res: Response) => {
+// ─── GET /api/instagram/auth ──────────────────────────────────────────────────
+// PUBLIC — redirects browser directly to Facebook OAuth
+// Called from frontend: window.location.href = '/api/instagram/auth'
+router.get('/auth', authenticate, (req: AuthRequest, res: Response) => {
   const redirectUri = `${process.env.BACKEND_URL}/api/instagram/callback`;
+
   const scopes = [
-  'public_profile',
-  'pages_show_list',
-  'business_management',
-  'pages_manage_metadata'
-].join(' ');
+    'public_profile',
+    'pages_show_list',
+    'pages_read_engagement',
+    'instagram_basic',
+    'instagram_manage_comments',
+  ].join(',');
+
+  const url = `https://www.facebook.com/v18.0/dialog/oauth?client_id=${process.env.META_APP_ID}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${scopes}&response_type=code&state=${req.user!.id}`;
+
+  // Redirect browser directly to Facebook
+  res.redirect(url);
+});
+
+// ─── GET /api/instagram/auth-url ─────────────────────────────────────────────
+// Returns JSON URL (for frontend to open in same tab or popup)
+router.get('/auth-url', authenticate, (req: AuthRequest, res: Response) => {
+  const redirectUri = `${process.env.BACKEND_URL}/api/instagram/callback`;
+
+  const scopes = [
+    'public_profile',
+    'pages_show_list',
+    'pages_read_engagement',
+    'instagram_basic',
+    'instagram_manage_comments',
+  ].join(',');
 
   const url = `https://www.facebook.com/v18.0/dialog/oauth?client_id=${process.env.META_APP_ID}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${scopes}&response_type=code&state=${req.user!.id}`;
 
@@ -25,23 +48,36 @@ router.get('/auth-url', (req: AuthRequest, res: Response) => {
 });
 
 // ─── GET /api/instagram/callback ─────────────────────────────────────────────
-router.get('/callback', async (req: AuthRequest, res: Response) => {
+// PUBLIC — Facebook redirects here after user approves
+// No authenticate middleware — Facebook calls this directly
+router.get('/callback', async (req: Request, res: Response) => {
   const { code, state: userId, error } = req.query as Record<string, string>;
 
   if (error) {
+    logger.error('Instagram OAuth denied:', error);
     return res.redirect(`${process.env.FRONTEND_URL}/dashboard/instagram?error=access_denied`);
+  }
+
+  if (!code || !userId) {
+    return res.redirect(`${process.env.FRONTEND_URL}/dashboard/instagram?error=missing_params`);
   }
 
   try {
     const redirectUri = `${process.env.BACKEND_URL}/api/instagram/callback`;
+
+    // Exchange code for short-lived token
     const { access_token: shortToken, user_id } = await exchangeCodeForToken(code, redirectUri);
+
+    // Exchange for long-lived token
     const { access_token, expires_in } = await getLongLivedToken(shortToken);
 
+    // Get Instagram account info
     const igService = new InstagramService(access_token, user_id);
     const accountInfo = await igService.getAccountInfo();
 
     const tokenExpiry = new Date(Date.now() + expires_in * 1000);
 
+    // Save to database
     await prisma.instagramAccount.upsert({
       where: { userId },
       create: {
@@ -65,6 +101,7 @@ router.get('/callback', async (req: AuthRequest, res: Response) => {
       },
     });
 
+    logger.info(`Instagram connected for user ${userId}`);
     res.redirect(`${process.env.FRONTEND_URL}/dashboard/instagram?success=true`);
   } catch (err) {
     logger.error('Instagram OAuth error:', err);
@@ -73,12 +110,17 @@ router.get('/callback', async (req: AuthRequest, res: Response) => {
 });
 
 // ─── GET /api/instagram/status ────────────────────────────────────────────────
-router.get('/status', async (req: AuthRequest, res: Response) => {
+router.get('/status', authenticate, async (req: AuthRequest, res: Response) => {
   const account = await prisma.instagramAccount.findUnique({
     where: { userId: req.user!.id },
     select: {
-      id: true, username: true, isActive: true, automationOn: true,
-      followerCount: true, profilePicUrl: true, connectedAt: true,
+      id: true,
+      username: true,
+      isActive: true,
+      automationOn: true,
+      followerCount: true,
+      profilePicUrl: true,
+      connectedAt: true,
       webhookVerified: true,
     },
   });
@@ -86,7 +128,7 @@ router.get('/status', async (req: AuthRequest, res: Response) => {
 });
 
 // ─── POST /api/instagram/toggle-automation ────────────────────────────────────
-router.post('/toggle-automation', requireActiveSubscription, async (req: AuthRequest, res: Response) => {
+router.post('/toggle-automation', authenticate, requireActiveSubscription, async (req: AuthRequest, res: Response) => {
   const { enabled } = req.body;
 
   const account = await prisma.instagramAccount.findUnique({
@@ -107,7 +149,7 @@ router.post('/toggle-automation', requireActiveSubscription, async (req: AuthReq
 });
 
 // ─── DELETE /api/instagram/disconnect ────────────────────────────────────────
-router.delete('/disconnect', async (req: AuthRequest, res: Response) => {
+router.delete('/disconnect', authenticate, async (req: AuthRequest, res: Response) => {
   await prisma.instagramAccount.deleteMany({
     where: { userId: req.user!.id },
   });
@@ -115,7 +157,7 @@ router.delete('/disconnect', async (req: AuthRequest, res: Response) => {
 });
 
 // ─── GET /api/instagram/media ─────────────────────────────────────────────────
-router.get('/media', requireActiveSubscription, async (req: AuthRequest, res: Response) => {
+router.get('/media', authenticate, requireActiveSubscription, async (req: AuthRequest, res: Response) => {
   const account = await prisma.instagramAccount.findUnique({
     where: { userId: req.user!.id },
   });
