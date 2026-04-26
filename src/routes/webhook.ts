@@ -2,24 +2,24 @@ import { Router, Request, Response } from 'express';
 import Stripe from 'stripe';
 import { prisma } from '../utils/prisma';
 import { logger } from '../utils/logger';
-import { decrypt } from '../utils/encryption';
 import { automationQueue } from '../workers/automationQueue';
 
 const router = Router();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!);
 
-// ─── GET /api/webhook/instagram — Verify webhook ──────────────────────────────
+// ─── GET /api/webhook/instagram — Verify webhook ─────────────────────────────
 router.get('/instagram', (req: Request, res: Response) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
 
-  if (!igAccount.webhookVerified) {
-  await prisma.instagramAccount.update({
-    where: { id: igAccount.id },
-    data: { webhookVerified: true },
-  });
-}
+  if (mode === 'subscribe' && token === process.env.META_WEBHOOK_VERIFY_TOKEN) {
+    logger.info('Instagram webhook verified');
+    return res.status(200).send(challenge);
+  }
+
+  return res.status(403).json({ error: 'Forbidden' });
+});
 
 // ─── POST /api/webhook/instagram — Receive events ────────────────────────────
 router.post('/instagram', async (req: Request, res: Response) => {
@@ -32,13 +32,21 @@ router.post('/instagram', async (req: Request, res: Response) => {
   for (const entry of body.entry || []) {
     const pageId = entry.id;
 
-    // Find the user with this Instagram page
+    // Find the account — match on igUserId (entry.id is the IG User ID)
     const igAccount = await prisma.instagramAccount.findFirst({
-      where: { pageId, automationOn: true, isActive: true },
+      where: { igUserId: pageId, automationOn: true, isActive: true },
       include: { user: { include: { aiSettings: true } } },
     });
 
     if (!igAccount) continue;
+
+    // Mark webhook as verified on first real event
+    if (!igAccount.webhookVerified) {
+      await prisma.instagramAccount.update({
+        where: { id: igAccount.id },
+        data: { webhookVerified: true },
+      });
+    }
 
     // Handle DMs
     for (const messaging of entry.messaging || []) {
@@ -139,7 +147,6 @@ router.post('/stripe', async (req: Request, res: Response) => {
           data: { subStatus: 'canceled', subPlan: 'free' },
         });
 
-        // Turn off automation
         await prisma.instagramAccount.updateMany({
           where: { userId: user.id },
           data: { automationOn: false },
