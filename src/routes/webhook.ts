@@ -14,13 +14,12 @@ router.get('/instagram', (req: Request, res: Response) => {
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
 
-  if (mode === 'subscribe' && token === process.env.META_WEBHOOK_VERIFY_TOKEN) {
-    logger.info('Instagram webhook verified');
-    res.status(200).send(challenge);
-  } else {
-    res.status(403).json({ error: 'Forbidden' });
-  }
-});
+  if (!igAccount.webhookVerified) {
+  await prisma.instagramAccount.update({
+    where: { id: igAccount.id },
+    data: { webhookVerified: true },
+  });
+}
 
 // ─── POST /api/webhook/instagram — Receive events ────────────────────────────
 router.post('/instagram', async (req: Request, res: Response) => {
