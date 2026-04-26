@@ -1,7 +1,7 @@
 import axios from 'axios';
 import { logger } from '../utils/logger';
 
-const BASE_URL = 'https://graph.facebook.com/v21.0;
+const BASE_URL = 'https://graph.facebook.com/v21.0';  // ✅ Fixed closing quote
 
 export interface IGMessage {
   id: string;
@@ -23,7 +23,6 @@ export class InstagramService {
   constructor(accessToken: string, igUserId: string) {
     if (!accessToken) throw new Error('Missing accessToken');
     if (!igUserId) throw new Error('Missing igUserId (this is required)');
-
     this.accessToken = accessToken;
     this.igUserId = igUserId;
   }
@@ -32,12 +31,8 @@ export class InstagramService {
   private async get(endpoint: string, params: Record<string, any> = {}) {
     try {
       const response = await axios.get(`${BASE_URL}/${endpoint}`, {
-        params: {
-          access_token: this.accessToken,
-          ...params,
-        },
+        params: { access_token: this.accessToken, ...params },
       });
-
       return response.data;
     } catch (error: any) {
       logger.error('GET request failed', error.response?.data || error.message);
@@ -46,19 +41,14 @@ export class InstagramService {
   }
 
   // ─── POST REQUEST (FIXED) ────────────────────────────────────────────────
+  // Token in params, data as JSON body — required for DM and comment endpoints
   private async post(endpoint: string, data: Record<string, any> = {}) {
     try {
       const response = await axios.post(
         `${BASE_URL}/${endpoint}`,
-        null,
-        {
-          params: {
-            access_token: this.accessToken,
-            ...data,
-          },
-        }
+        data,                                          // ✅ JSON body
+        { params: { access_token: this.accessToken } } // ✅ token in params
       );
-
       return response.data;
     } catch (error: any) {
       logger.error('POST request failed', error.response?.data || error.message);
@@ -73,7 +63,6 @@ export class InstagramService {
         recipient: { id: recipientId },
         message: { text: message },
       });
-
       logger.info('DM sent', { recipientId, messageId: data.message_id });
       return data;
     } catch (error: any) {
@@ -99,7 +88,6 @@ export class InstagramService {
         fields: 'id,messages{message,from,created_time},participants',
         limit,
       });
-
       return data?.data ?? [];
     } catch (error: any) {
       logger.error('Failed to get conversations', error.response?.data);
@@ -114,7 +102,6 @@ export class InstagramService {
         fields: 'id,message,from,created_time,attachments',
         limit,
       });
-
       return data?.data ?? [];
     } catch (error: any) {
       logger.error('Failed to get messages', error.response?.data);
@@ -129,7 +116,6 @@ export class InstagramService {
         fields: 'id,text,username,timestamp,from',
         limit: 50,
       });
-
       return data?.data ?? [];
     } catch (error: any) {
       logger.error('Failed to get comments', error.response?.data);
@@ -144,7 +130,6 @@ export class InstagramService {
         fields: 'id,caption,media_type,timestamp,comments_count,like_count',
         limit,
       });
-
       return data?.data ?? [];
     } catch (error: any) {
       logger.error('Failed to get media', error.response?.data);
@@ -156,8 +141,7 @@ export class InstagramService {
   async getAccountInfo() {
     try {
       return await this.get(this.igUserId, {
-        fields:
-          'id,username,name,profile_picture_url,followers_count,media_count,biography',
+        fields: 'id,username,name,profile_picture_url,followers_count,media_count,biography',
       });
     } catch (error: any) {
       logger.error('Failed to get account info', error.response?.data);
@@ -174,7 +158,6 @@ export class InstagramService {
           subscribed_fields: 'messages,comments,messaging_postbacks',
         },
       });
-
       return true;
     } catch (error: any) {
       logger.error('Webhook subscribe failed', error.response?.data);
@@ -184,21 +167,31 @@ export class InstagramService {
 }
 
 // ─── OAUTH: EXCHANGE CODE ──────────────────────────────────────────────────
+// ✅ FIXED: Facebook does NOT return user_id in token exchange
+// We fetch it separately via /me endpoint
 export async function exchangeCodeForToken(code: string, redirectUri: string) {
   try {
-    const response = await axios.get(
-      `${BASE_URL}/oauth/access_token`,
-      {
-        params: {
-          client_id: process.env.META_APP_ID,
-          client_secret: process.env.META_APP_SECRET,
-          redirect_uri: redirectUri,
-          code,
-        },
-      }
-    );
+    // Step 1 — exchange code for access token
+    const tokenRes = await axios.get(`${BASE_URL}/oauth/access_token`, {
+      params: {
+        client_id: process.env.META_APP_ID,
+        client_secret: process.env.META_APP_SECRET,
+        redirect_uri: redirectUri,
+        code,
+      },
+    });
 
-    return response.data;
+    const access_token = tokenRes.data.access_token;
+
+    // Step 2 — fetch user ID separately (not included in token response)
+    const meRes = await axios.get(`${BASE_URL}/me`, {
+      params: { access_token, fields: 'id' },
+    });
+
+    return {
+      access_token,
+      user_id: meRes.data.id,
+    };
   } catch (error: any) {
     logger.error('OAuth token exchange failed', error.response?.data);
     throw error;
@@ -208,18 +201,14 @@ export async function exchangeCodeForToken(code: string, redirectUri: string) {
 // ─── LONG LIVED TOKEN ──────────────────────────────────────────────────────
 export async function getLongLivedToken(shortToken: string) {
   try {
-    const response = await axios.get(
-      `${BASE_URL}/oauth/access_token`,
-      {
-        params: {
-          grant_type: 'fb_exchange_token',
-          client_id: process.env.META_APP_ID,
-          client_secret: process.env.META_APP_SECRET,
-          fb_exchange_token: shortToken,
-        },
-      }
-    );
-
+    const response = await axios.get(`${BASE_URL}/oauth/access_token`, {
+      params: {
+        grant_type: 'fb_exchange_token',
+        client_id: process.env.META_APP_ID,
+        client_secret: process.env.META_APP_SECRET,
+        fb_exchange_token: shortToken,
+      },
+    });
     return response.data;
   } catch (error: any) {
     logger.error('Long-lived token failed', error.response?.data);
