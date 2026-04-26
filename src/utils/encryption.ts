@@ -1,6 +1,9 @@
 import CryptoJS from 'crypto-js';
 
-const SECRET = process.env.ENCRYPTION_KEY || 'fallback-secret-change-in-production';
+if (!process.env.ENCRYPTION_KEY) {
+  throw new Error('ENCRYPTION_KEY environment variable is required');
+}
+const SECRET = process.env.ENCRYPTION_KEY;
 
 export function encrypt(text: string): string {
   return CryptoJS.AES.encrypt(text, SECRET).toString();
