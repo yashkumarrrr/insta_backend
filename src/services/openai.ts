@@ -1,7 +1,10 @@
 import OpenAI from 'openai';
 import { logger } from '../utils/logger';
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const openai = new OpenAI({
+  apiKey: process.env.GROQ_API_KEY,
+  baseURL: 'https://api.groq.com/openai/v1',
+});
 
 export interface AIReplyContext {
   businessName?: string;
@@ -85,7 +88,7 @@ CRITICAL RULES:
   });
 
   const response = await openai.chat.completions.create({
-    model: 'gpt-4o',
+    model: 'llama-3.3-70b-versatile',
     messages,
     max_tokens: 300,
     temperature: 0.8,
@@ -132,7 +135,7 @@ Rules:
     : `@${igUsername} commented: "${comment}"`;
 
   const response = await openai.chat.completions.create({
-    model: 'gpt-4o',
+    model: 'llama-3.3-70b-versatile',
     messages: [
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userPrompt },
@@ -152,7 +155,7 @@ export async function detectIntent(message: string): Promise<{
   sentiment: 'positive' | 'neutral' | 'negative';
 }> {
   const response = await openai.chat.completions.create({
-    model: 'gpt-4o-mini',
+    model: 'llama-3.1-8b-instant',
     messages: [
       {
         role: 'system',
