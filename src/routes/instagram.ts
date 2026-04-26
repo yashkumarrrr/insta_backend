@@ -121,6 +121,7 @@ router.get(
       'pages_read_engagement',
       'instagram_basic',
       'instagram_manage_comments',
+      'instagram_manage_messages',
     ].join(',');
 
     const url =
