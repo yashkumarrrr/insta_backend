@@ -64,11 +64,8 @@ export class InstagramService {
   }
 
   // ─── ACCOUNT INFO ─────────────────────────────────────────────────────────
-  // THE FIX: Facebook user ID ≠ Instagram Business Account ID
-  // Must go through /me/accounts → find page → get IG business account
   async getAccountInfo() {
     try {
-      // Step 1: Get all Facebook Pages this user manages
       const pagesData = await this.get('me/accounts', {
         fields: 'id,name,access_token,instagram_business_account',
       });
@@ -81,13 +78,12 @@ export class InstagramService {
         throw new Error('NO_PAGES: No Facebook Pages found. Create a Facebook Page and connect Instagram to it.');
       }
 
-      // Step 2: Find page that has Instagram Business Account linked
       const pageWithIG = pages.find(
         (p: any) => p.instagram_business_account?.id
       );
 
       if (!pageWithIG) {
-        throw new Error('NO_IG_BUSINESS: None of your Facebook Pages have an Instagram Business account linked. Go to Instagram → Settings → Account Type → Switch to Professional Account, then link it to your Facebook Page.');
+        throw new Error('NO_IG_BUSINESS: None of your Facebook Pages have an Instagram Business account linked.');
       }
 
       const igAccountId = pageWithIG.instagram_business_account.id;
@@ -98,10 +94,9 @@ export class InstagramService {
         pageName: pageWithIG.name,
       });
 
-      // Step 3: Get Instagram account details using PAGE access token
       const igInfo = await axios.get(`${BASE_URL}/${igAccountId}`, {
         params: {
-          access_token: pageAccessToken, // ← must use PAGE token not user token
+          access_token: pageAccessToken,
           fields: 'id,username,profile_picture_url,followers_count,media_count,biography',
         },
       });
@@ -115,7 +110,6 @@ export class InstagramService {
         followers_count: igInfo.data.followers_count ?? 0,
         media_count: igInfo.data.media_count ?? 0,
         biography: igInfo.data.biography ?? '',
-        // Return page token — needed for posting comments/DMs
         page_access_token: pageAccessToken,
         page_id: pageWithIG.id,
       };
@@ -231,7 +225,6 @@ export class InstagramService {
 // ─── OAUTH: EXCHANGE CODE ─────────────────────────────────────────────────
 export async function exchangeCodeForToken(code: string, redirectUri: string) {
   try {
-    // Step 1 — exchange code for short-lived user access token
     const tokenRes = await axios.get(`${BASE_URL}/oauth/access_token`, {
       params: {
         client_id: process.env.META_APP_ID,
@@ -242,10 +235,8 @@ export async function exchangeCodeForToken(code: string, redirectUri: string) {
     });
 
     const access_token = tokenRes.data.access_token;
-
     logger.info('Short-lived token obtained');
 
-    // Step 2 — fetch Facebook User ID
     const meRes = await axios.get(`${BASE_URL}/me`, {
       params: { access_token, fields: 'id,name' },
     });
