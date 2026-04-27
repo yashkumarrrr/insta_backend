@@ -286,8 +286,21 @@ router.delete(
       await prisma.instagramAccount.deleteMany({
         where: { userId: req.user!.id },
       });
-      logger.info(`Instagram disconnected for user ${req.user!.id}`);
-      res.json({ message: 'Instagram account disconnected' });
+      logger.info(`Automation ${enabled ? 'ON' : 'OFF'} for user ${req.user!.id}`);
+
+// Auto-subscribe webhook when turning automation ON
+if (enabled && account.pageId && account.pageToken) {
+  try {
+    const pageToken = decrypt(account.pageToken);
+    const igService = new InstagramService(decrypt(account.accessToken), account.igUserId);
+    await igService.subscribeToWebhooks(account.pageId, pageToken);
+    logger.info(`✅ Webhook subscribed for page ${account.pageId}`);
+  } catch (err) {
+    logger.error('Failed to subscribe webhook:', err);
+  }
+}
+
+res.json({ automationOn: updated.automationOn });
     } catch (err) {
       logger.error('Error disconnecting:', err);
       res.status(500).json({ error: 'Failed to disconnect' });
