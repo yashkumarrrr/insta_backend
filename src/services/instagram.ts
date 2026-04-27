@@ -141,7 +141,7 @@ export class InstagramService {
   async getAccountInfo() {
     try {
       return await this.get(this.igUserId, {
-        fields: 'id,username',
+        fields: 'id',
       });
     } catch (error: any) {
       logger.error('Failed to get account info', error.response?.data);
