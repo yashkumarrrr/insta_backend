@@ -9,7 +9,6 @@ import crypto from 'crypto';
 
 const router = Router();
 
-// ─── RATE LIMITERS ────────────────────────────────────────────────────────────
 const authRateLimit = rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 10,
@@ -37,7 +36,6 @@ const strictRateLimit = rateLimit({
   keyGenerator: (req: any) => req.user?.id || req.ip || 'unknown',
 });
 
-// ─── CSRF STATE MAP ───────────────────────────────────────────────────────────
 const validStates = new Map<string, { userId: string; expiresAt: number }>();
 
 const generateState = (userId: string): string => {
@@ -68,65 +66,49 @@ setInterval(() => {
 }, 15 * 60 * 1000);
 
 // ─── GET /api/instagram/auth ──────────────────────────────────────────────────
-router.get(
-  '/auth',
-  authRateLimit,
-  authenticate,
-  (req: AuthRequest, res: Response) => {
-    const redirectUri = `${process.env.BACKEND_URL}/api/instagram/callback`;
-    const state = generateState(req.user!.id);
-
-    const scopes = [
-      'public_profile',
-      'pages_show_list',
-      'pages_read_engagement',
-      'instagram_basic',
-      'instagram_manage_comments',
-      'instagram_manage_messages',
-    ].join(',');
-
-    const url =
-      `https://www.facebook.com/v21.0/dialog/oauth` +
-      `?client_id=${process.env.META_APP_ID}` +
-      `&redirect_uri=${encodeURIComponent(redirectUri)}` +
-      `&scope=${scopes}` +
-      `&response_type=code` +
-      `&state=${state}`;
-
-    logger.info(`Instagram OAuth initiated for user ${req.user!.id}`);
-    res.redirect(url);
-  }
-);
+router.get('/auth', authRateLimit, authenticate, (req: AuthRequest, res: Response) => {
+  const redirectUri = `${process.env.BACKEND_URL}/api/instagram/callback`;
+  const state = generateState(req.user!.id);
+  const scopes = [
+    'public_profile',
+    'pages_show_list',
+    'pages_read_engagement',
+    'instagram_basic',
+    'instagram_manage_comments',
+    'instagram_manage_messages',
+  ].join(',');
+  const url =
+    `https://www.facebook.com/v21.0/dialog/oauth` +
+    `?client_id=${process.env.META_APP_ID}` +
+    `&redirect_uri=${encodeURIComponent(redirectUri)}` +
+    `&scope=${scopes}` +
+    `&response_type=code` +
+    `&state=${state}`;
+  logger.info(`Instagram OAuth initiated for user ${req.user!.id}`);
+  res.redirect(url);
+});
 
 // ─── GET /api/instagram/auth-url ─────────────────────────────────────────────
-router.get(
-  '/auth-url',
-  authRateLimit,
-  authenticate,
-  (req: AuthRequest, res: Response) => {
-    const redirectUri = `${process.env.BACKEND_URL}/api/instagram/callback`;
-    const state = generateState(req.user!.id);
-
-    const scopes = [
-      'public_profile',
-      'pages_show_list',
-      'pages_read_engagement',
-      'instagram_basic',
-      'instagram_manage_comments',
-      'instagram_manage_messages',
-    ].join(',');
-
-    const url =
-      `https://www.facebook.com/v21.0/dialog/oauth` +
-      `?client_id=${process.env.META_APP_ID}` +
-      `&redirect_uri=${encodeURIComponent(redirectUri)}` +
-      `&scope=${scopes}` +
-      `&response_type=code` +
-      `&state=${state}`;
-
-    res.json({ url });
-  }
-);
+router.get('/auth-url', authRateLimit, authenticate, (req: AuthRequest, res: Response) => {
+  const redirectUri = `${process.env.BACKEND_URL}/api/instagram/callback`;
+  const state = generateState(req.user!.id);
+  const scopes = [
+    'public_profile',
+    'pages_show_list',
+    'pages_read_engagement',
+    'instagram_basic',
+    'instagram_manage_comments',
+    'instagram_manage_messages',
+  ].join(',');
+  const url =
+    `https://www.facebook.com/v21.0/dialog/oauth` +
+    `?client_id=${process.env.META_APP_ID}` +
+    `&redirect_uri=${encodeURIComponent(redirectUri)}` +
+    `&scope=${scopes}` +
+    `&response_type=code` +
+    `&state=${state}`;
+  res.json({ url });
+});
 
 // ─── GET /api/instagram/callback ─────────────────────────────────────────────
 router.get('/callback', authRateLimit, async (req: Request, res: Response) => {
@@ -134,32 +116,24 @@ router.get('/callback', authRateLimit, async (req: Request, res: Response) => {
 
   if (error) {
     logger.warn(`Instagram OAuth denied: ${error} - ${error_description}`);
-    return res.redirect(
-      `${process.env.FRONTEND_URL}/dashboard/instagram?error=access_denied`
-    );
+    return res.redirect(`${process.env.FRONTEND_URL}/dashboard/instagram?error=access_denied`);
   }
 
   if (!code || !state) {
     logger.warn('Instagram callback: missing code or state');
-    return res.redirect(
-      `${process.env.FRONTEND_URL}/dashboard/instagram?error=invalid_request`
-    );
+    return res.redirect(`${process.env.FRONTEND_URL}/dashboard/instagram?error=invalid_request`);
   }
 
   const userId = validateState(state);
   if (!userId) {
     logger.warn(`Instagram callback: invalid or expired state ${state}`);
-    return res.redirect(
-      `${process.env.FRONTEND_URL}/dashboard/instagram?error=invalid_state`
-    );
+    return res.redirect(`${process.env.FRONTEND_URL}/dashboard/instagram?error=invalid_state`);
   }
 
   const user = await prisma.user.findUnique({ where: { id: userId } });
   if (!user) {
     logger.warn(`Instagram callback: user not found ${userId}`);
-    return res.redirect(
-      `${process.env.FRONTEND_URL}/dashboard/instagram?error=user_not_found`
-    );
+    return res.redirect(`${process.env.FRONTEND_URL}/dashboard/instagram?error=user_not_found`);
   }
 
   try {
@@ -199,43 +173,44 @@ router.get('/callback', authRateLimit, async (req: Request, res: Response) => {
       },
     });
 
+    // ✅ Auto-subscribe webhook on connect
+    try {
+      await igService.subscribeToWebhooks(accountInfo.page_id, accountInfo.page_access_token);
+      logger.info(`✅ Webhook subscribed for page ${accountInfo.page_id}`);
+    } catch (err) {
+      logger.error('Failed to subscribe webhook on connect:', err);
+    }
+
     logger.info(`Instagram connected for user ${userId} (@${accountInfo.username}) igId=${accountInfo.id}`);
     res.redirect(`${process.env.FRONTEND_URL}/dashboard/instagram?success=true`);
   } catch (err) {
     logger.error('Instagram OAuth error:', err);
-    res.redirect(
-      `${process.env.FRONTEND_URL}/dashboard/instagram?error=auth_failed`
-    );
+    res.redirect(`${process.env.FRONTEND_URL}/dashboard/instagram?error=auth_failed`);
   }
 });
 
 // ─── GET /api/instagram/status ────────────────────────────────────────────────
-router.get(
-  '/status',
-  apiRateLimit,
-  authenticate,
-  async (req: AuthRequest, res: Response) => {
-    try {
-      const account = await prisma.instagramAccount.findUnique({
-        where: { userId: req.user!.id },
-        select: {
-          id: true,
-          username: true,
-          isActive: true,
-          automationOn: true,
-          followerCount: true,
-          profilePicUrl: true,
-          connectedAt: true,
-          webhookVerified: true,
-        },
-      });
-      res.json({ connected: !!account, account });
-    } catch (err) {
-      logger.error('Error fetching status:', err);
-      res.status(500).json({ error: 'Failed to fetch status' });
-    }
+router.get('/status', apiRateLimit, authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    const account = await prisma.instagramAccount.findUnique({
+      where: { userId: req.user!.id },
+      select: {
+        id: true,
+        username: true,
+        isActive: true,
+        automationOn: true,
+        followerCount: true,
+        profilePicUrl: true,
+        connectedAt: true,
+        webhookVerified: true,
+      },
+    });
+    res.json({ connected: !!account, account });
+  } catch (err) {
+    logger.error('Error fetching status:', err);
+    res.status(500).json({ error: 'Failed to fetch status' });
   }
-);
+});
 
 // ─── POST /api/instagram/toggle-automation ────────────────────────────────────
 router.post(
@@ -287,23 +262,18 @@ router.post(
 );
 
 // ─── DELETE /api/instagram/disconnect ────────────────────────────────────────
-router.delete(
-  '/disconnect',
-  strictRateLimit,
-  authenticate,
-  async (req: AuthRequest, res: Response) => {
-    try {
-      await prisma.instagramAccount.deleteMany({
-        where: { userId: req.user!.id },
-      });
-      logger.info(`Instagram disconnected for user ${req.user!.id}`);
-      res.json({ message: 'Instagram account disconnected' });
-    } catch (err) {
-      logger.error('Error disconnecting:', err);
-      res.status(500).json({ error: 'Failed to disconnect' });
-    }
+router.delete('/disconnect', strictRateLimit, authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    await prisma.instagramAccount.deleteMany({
+      where: { userId: req.user!.id },
+    });
+    logger.info(`Instagram disconnected for user ${req.user!.id}`);
+    res.json({ message: 'Instagram account disconnected' });
+  } catch (err) {
+    logger.error('Error disconnecting:', err);
+    res.status(500).json({ error: 'Failed to disconnect' });
   }
-);
+});
 
 // ─── GET /api/instagram/media ─────────────────────────────────────────────────
 router.get(
