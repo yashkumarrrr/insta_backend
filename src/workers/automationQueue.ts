@@ -7,6 +7,8 @@ import { logger } from '../utils/logger';
 
 const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
 
+logger.info(`🔴 Redis URL: ${REDIS_URL}`);
+
 export const automationQueue = new Bull('automation', REDIS_URL, {
   defaultJobOptions: {
     attempts: 3,
@@ -19,13 +21,21 @@ export const automationQueue = new Bull('automation', REDIS_URL, {
   },
 });
 
+automationQueue.on('ready', () => {
+  logger.info('✅ Bull queue connected to Redis');
+});
+
+automationQueue.on('error', (err) => {
+  logger.error('❌ Bull queue error:', err.message);
+});
+
 // Rate limiter state (in-memory; use Redis in production cluster)
 const rateLimiter: Map<string, { count: number; windowStart: number }> = new Map();
 
 function checkRateLimit(userId: string, type: 'dm' | 'reply', maxPerHour: number): boolean {
   const key = `${userId}:${type}`;
   const now = Date.now();
-  const windowMs = 60 * 60 * 1000; // 1 hour
+  const windowMs = 60 * 60 * 1000;
 
   const state = rateLimiter.get(key);
   if (!state || now - state.windowStart > windowMs) {
@@ -49,7 +59,6 @@ automationQueue.process('process-dm', 5, async (job) => {
   logger.info('Processing DM automation', { userId, senderId });
 
   try {
-    // Get user's IG account and AI settings
     const [igAccount, aiSettings] = await Promise.all([
       prisma.instagramAccount.findUnique({ where: { userId } }),
       prisma.aISettings.findUnique({ where: { userId } }),
@@ -60,7 +69,6 @@ automationQueue.process('process-dm', 5, async (job) => {
       return;
     }
 
-    // Rate limiting
     if (!checkRateLimit(userId, 'dm', aiSettings?.maxDMsPerHour || 20)) {
       await prisma.automationLog.create({
         data: { userId, type: 'rate_limit', status: 'failed', source: 'dm', igUserId: senderId },
@@ -68,13 +76,11 @@ automationQueue.process('process-dm', 5, async (job) => {
       return;
     }
 
-    // Skip own messages
     if (senderId === igAccount.igUserId) return;
 
     const token = decrypt(igAccount.accessToken);
     const igService = new InstagramService(token, igAccount.igUserId);
 
-    // Get or create conversation
     let conversation = await prisma.conversation.findFirst({
       where: { userId, igUserId: senderId },
       include: { messages: { orderBy: { sentAt: 'desc' }, take: 10 } },
@@ -92,7 +98,6 @@ automationQueue.process('process-dm', 5, async (job) => {
       return;
     }
 
-    // Store incoming message
     await prisma.message.create({
       data: {
         conversationId: conversation.id,
@@ -103,10 +108,8 @@ automationQueue.process('process-dm', 5, async (job) => {
       },
     });
 
-    // Detect intent
     const { isLead } = await detectIntent(message);
 
-    // Build conversation history for AI context
     const history = conversation.messages
       .reverse()
       .slice(-6)
@@ -115,7 +118,6 @@ automationQueue.process('process-dm', 5, async (job) => {
         content: m.content,
       }));
 
-    // Generate AI reply
     const aiReply = await generateAIReply(
       {
         businessName: aiSettings?.businessName || undefined,
@@ -134,10 +136,8 @@ automationQueue.process('process-dm', 5, async (job) => {
       }
     );
 
-    // Send DM via Instagram
     await igService.sendDM(senderId, aiReply);
 
-    // Store outbound message
     await prisma.message.create({
       data: {
         conversationId: conversation.id,
@@ -148,7 +148,6 @@ automationQueue.process('process-dm', 5, async (job) => {
       },
     });
 
-    // Update conversation stats
     await prisma.conversation.update({
       where: { id: conversation.id },
       data: {
@@ -159,7 +158,6 @@ automationQueue.process('process-dm', 5, async (job) => {
       },
     });
 
-    // Create lead if detected
     if (isLead && !conversation.isLead) {
       await prisma.lead.upsert({
         where: { conversationId: conversation.id },
@@ -182,9 +180,9 @@ automationQueue.process('process-dm', 5, async (job) => {
       },
     });
 
-    logger.info('DM automation completed', { userId, senderId });
+    logger.info('✅ DM automation completed', { userId, senderId });
   } catch (error: any) {
-    logger.error('DM automation error:', error);
+    logger.error('❌ DM automation error:', error);
     await prisma.automationLog.create({
       data: {
         userId, type: 'error', status: 'failed',
@@ -192,7 +190,7 @@ automationQueue.process('process-dm', 5, async (job) => {
         error: error.message,
       },
     });
-    throw error; // Triggers retry
+    throw error;
   }
 });
 
@@ -215,7 +213,6 @@ automationQueue.process('process-comment', 3, async (job) => {
       return;
     }
 
-    // Skip own comments
     if (senderId === igAccount.igUserId) return;
 
     const token = decrypt(igAccount.accessToken);
@@ -245,19 +242,18 @@ automationQueue.process('process-comment', 3, async (job) => {
       },
     });
 
-    // If user also wants to send follow-up DM
     if (aiSettings.autoSendDMs) {
       await automationQueue.add('process-dm', {
         userId, senderId,
         message: `${senderName || 'Someone'} commented: "${commentText}"`,
         messageId: `comment_${commentId}`,
         isFromComment: true,
-      }, { delay: 30000 }); // 30s delay after comment reply
+      }, { delay: 30000 });
     }
 
-    logger.info('Comment automation completed', { userId, commentId });
+    logger.info('✅ Comment automation completed', { userId, commentId });
   } catch (error: any) {
-    logger.error('Comment automation error:', error);
+    logger.error('❌ Comment automation error:', error);
     await prisma.automationLog.create({
       data: {
         userId, type: 'error', status: 'failed',
@@ -270,11 +266,11 @@ automationQueue.process('process-comment', 3, async (job) => {
 
 // Queue events
 automationQueue.on('failed', (job, err) => {
-  logger.error(`Job ${job.id} failed:`, err.message);
+  logger.error(`❌ Job ${job.id} failed:`, err.message);
 });
 
 automationQueue.on('completed', (job) => {
-  logger.debug(`Job ${job.id} completed`);
+  logger.info(`✅ Job ${job.id} completed`);
 });
 
 export default automationQueue;
