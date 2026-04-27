@@ -193,8 +193,8 @@ router.get('/callback', authRateLimit, async (req: Request, res: Response) => {
         username: accountInfo.username,
         accessToken: encrypt(access_token),
         tokenExpiry,
-        profilePicUrl: accountInfo.profile_picture_url ?? null,   // ✅ null safe
-        followerCount: accountInfo.followers_count ?? null,        // ✅ null safe
+        profilePicUrl: null,   // ✅ null safe
+        followerCount: null,        // ✅ null safe
         isActive: true,
       },
     });
