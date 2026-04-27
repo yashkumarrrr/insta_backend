@@ -18,6 +18,7 @@ import billingRoutes from './routes/billing';
 import dashboardRoutes from './routes/dashboard';
 import conversationRoutes from './routes/conversations';
 import leadsRoutes from './routes/leads';
+import './workers/automationQueue';
 
 const app = express();
 app.set('trust proxy', 1);
