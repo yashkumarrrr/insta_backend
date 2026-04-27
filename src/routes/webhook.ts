@@ -31,7 +31,6 @@ router.get('/instagram', (req: Request, res: Response) => {
 // ✅ INSTAGRAM WEBHOOK EVENTS (POST)
 // ─────────────────────────────────────────────
 router.post('/instagram', async (req: Request, res: Response) => {
-  // respond immediately (IMPORTANT for Meta)
   res.status(200).json({ status: 'ok' });
 
   try {
@@ -46,9 +45,6 @@ router.post('/instagram', async (req: Request, res: Response) => {
 
       logger.info(`🔥 Instagram webhook IG ID: ${igId}`);
 
-      // ─────────────────────────────
-      // 🔥 FIND INSTAGRAM ACCOUNT
-      // ─────────────────────────────
       const igAccount = await prisma.instagramAccount.findFirst({
         where: {
           igUserId: igId,
@@ -71,9 +67,9 @@ router.post('/instagram', async (req: Request, res: Response) => {
 
       logger.info(`✅ IG account found: ${igAccount.id}`);
 
-      // ─────────────────────────────
-      // mark webhook verified
-      // ─────────────────────────────
+      // ─── DEBUG: log raw entry ───────────────────────────
+      logger.info(`📦 Raw entry: ${JSON.stringify(entry).substring(0, 800)}`);
+
       if (!igAccount.webhookVerified) {
         await prisma.instagramAccount.update({
           where: { id: igAccount.id },
