@@ -169,9 +169,6 @@ router.get('/callback', authRateLimit, async (req: Request, res: Response) => {
 
     const igService = new InstagramService(access_token, user_id);
     const accountInfo = await igService.getAccountInfo();
-    // ✅ accountInfo.id  = Instagram Business Account ID (what webhooks send)
-    // ✅ accountInfo.page_id = Facebook Page ID
-    // ✅ accountInfo.page_access_token = Page token (needed for DMs)
 
     const tokenExpiry = expires_in ? new Date(Date.now() + expires_in * 1000) : null;
 
@@ -179,23 +176,23 @@ router.get('/callback', authRateLimit, async (req: Request, res: Response) => {
       where: { userId },
       create: {
         userId,
-        igUserId: accountInfo.id,                           // ← IG Business Account ID
+        igUserId: accountInfo.id,
         username: accountInfo.username,
         accessToken: encrypt(access_token),
         tokenExpiry,
-        pageId: accountInfo.page_id,                        // ← Facebook Page ID
-        pageToken: encrypt(accountInfo.page_access_token),  // ← Page token (encrypted)
+        pageId: accountInfo.page_id,
+        pageToken: encrypt(accountInfo.page_access_token),
         profilePicUrl: accountInfo.profile_picture_url ?? null,
         followerCount: accountInfo.followers_count ?? null,
         isActive: true,
       },
       update: {
-        igUserId: accountInfo.id,                           // ← IG Business Account ID
+        igUserId: accountInfo.id,
         username: accountInfo.username,
         accessToken: encrypt(access_token),
         tokenExpiry,
-        pageId: accountInfo.page_id,                        // ← Facebook Page ID
-        pageToken: encrypt(accountInfo.page_access_token),  // ← Page token (encrypted)
+        pageId: accountInfo.page_id,
+        pageToken: encrypt(accountInfo.page_access_token),
         profilePicUrl: accountInfo.profile_picture_url ?? null,
         followerCount: accountInfo.followers_count ?? null,
         isActive: true,
@@ -268,6 +265,19 @@ router.post(
       });
 
       logger.info(`Automation ${enabled ? 'ON' : 'OFF'} for user ${req.user!.id}`);
+
+      // Auto-subscribe webhook when turning automation ON
+      if (enabled && account.pageId && account.pageToken) {
+        try {
+          const pageToken = decrypt(account.pageToken);
+          const igService = new InstagramService(decrypt(account.accessToken), account.igUserId);
+          await igService.subscribeToWebhooks(account.pageId, pageToken);
+          logger.info(`✅ Webhook subscribed for page ${account.pageId}`);
+        } catch (err) {
+          logger.error('Failed to subscribe webhook:', err);
+        }
+      }
+
       res.json({ automationOn: updated.automationOn });
     } catch (err) {
       logger.error('Error toggling automation:', err);
@@ -286,21 +296,8 @@ router.delete(
       await prisma.instagramAccount.deleteMany({
         where: { userId: req.user!.id },
       });
-      logger.info(`Automation ${enabled ? 'ON' : 'OFF'} for user ${req.user!.id}`);
-
-// Auto-subscribe webhook when turning automation ON
-if (enabled && account.pageId && account.pageToken) {
-  try {
-    const pageToken = decrypt(account.pageToken);
-    const igService = new InstagramService(decrypt(account.accessToken), account.igUserId);
-    await igService.subscribeToWebhooks(account.pageId, pageToken);
-    logger.info(`✅ Webhook subscribed for page ${account.pageId}`);
-  } catch (err) {
-    logger.error('Failed to subscribe webhook:', err);
-  }
-}
-
-res.json({ automationOn: updated.automationOn });
+      logger.info(`Instagram disconnected for user ${req.user!.id}`);
+      res.json({ message: 'Instagram account disconnected' });
     } catch (err) {
       logger.error('Error disconnecting:', err);
       res.status(500).json({ error: 'Failed to disconnect' });
