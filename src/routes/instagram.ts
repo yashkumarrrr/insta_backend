@@ -76,7 +76,6 @@ router.get(
     const redirectUri = `${process.env.BACKEND_URL}/api/instagram/callback`;
     const state = generateState(req.user!.id);
 
-    // ✅ FIXED: added instagram_manage_messages, updated to v21.0
     const scopes = [
       'public_profile',
       'pages_show_list',
@@ -108,7 +107,6 @@ router.get(
     const redirectUri = `${process.env.BACKEND_URL}/api/instagram/callback`;
     const state = generateState(req.user!.id);
 
-    // ✅ FIXED: added instagram_manage_messages, updated to v21.0
     const scopes = [
       'public_profile',
       'pages_show_list',
@@ -166,13 +164,14 @@ router.get('/callback', authRateLimit, async (req: Request, res: Response) => {
 
   try {
     const redirectUri = `${process.env.BACKEND_URL}/api/instagram/callback`;
-
-    // ✅ FIXED: exchangeCodeForToken now fetches user_id from /me endpoint
     const { access_token: shortToken, user_id } = await exchangeCodeForToken(code, redirectUri);
     const { access_token, expires_in } = await getLongLivedToken(shortToken);
 
     const igService = new InstagramService(access_token, user_id);
     const accountInfo = await igService.getAccountInfo();
+    // ✅ accountInfo.id  = Instagram Business Account ID (what webhooks send)
+    // ✅ accountInfo.page_id = Facebook Page ID
+    // ✅ accountInfo.page_access_token = Page token (needed for DMs)
 
     const tokenExpiry = new Date(Date.now() + expires_in * 1000);
 
@@ -180,26 +179,30 @@ router.get('/callback', authRateLimit, async (req: Request, res: Response) => {
       where: { userId },
       create: {
         userId,
-        igUserId: user_id,
+        igUserId: accountInfo.id,                           // ← IG Business Account ID
         username: accountInfo.username,
         accessToken: encrypt(access_token),
         tokenExpiry,
-        profilePicUrl: null,   // ✅ null safe
-        followerCount: null,        // ✅ null safe
+        pageId: accountInfo.page_id,                        // ← Facebook Page ID
+        pageToken: encrypt(accountInfo.page_access_token),  // ← Page token (encrypted)
+        profilePicUrl: accountInfo.profile_picture_url ?? null,
+        followerCount: accountInfo.followers_count ?? null,
         isActive: true,
       },
       update: {
-        igUserId: user_id,
+        igUserId: accountInfo.id,                           // ← IG Business Account ID
         username: accountInfo.username,
         accessToken: encrypt(access_token),
         tokenExpiry,
-        profilePicUrl: null,   // ✅ null safe
-        followerCount: null,        // ✅ null safe
+        pageId: accountInfo.page_id,                        // ← Facebook Page ID
+        pageToken: encrypt(accountInfo.page_access_token),  // ← Page token (encrypted)
+        profilePicUrl: accountInfo.profile_picture_url ?? null,
+        followerCount: accountInfo.followers_count ?? null,
         isActive: true,
       },
     });
 
-    logger.info(`Instagram connected for user ${userId} (@${accountInfo.username})`);
+    logger.info(`Instagram connected for user ${userId} (@${accountInfo.username}) igId=${accountInfo.id}`);
     res.redirect(`${process.env.FRONTEND_URL}/dashboard/instagram?success=true`);
   } catch (err) {
     logger.error('Instagram OAuth error:', err);
