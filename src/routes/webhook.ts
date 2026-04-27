@@ -7,84 +7,134 @@ import { automationQueue } from '../workers/automationQueue';
 const router = Router();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!);
 
-// ─── GET /api/webhook/instagram — Verify webhook ─────────────────────────────
+// ─────────────────────────────────────────────
+// ✅ INSTAGRAM WEBHOOK VERIFY (GET)
+// ─────────────────────────────────────────────
 router.get('/instagram', (req: Request, res: Response) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
 
-  if (mode === 'subscribe' && token === process.env.META_WEBHOOK_VERIFY_TOKEN) {
-    logger.info('Instagram webhook verified');
+  if (
+    mode === 'subscribe' &&
+    token === process.env.META_WEBHOOK_VERIFY_TOKEN
+  ) {
+    logger.info('✅ Instagram webhook verified');
     return res.status(200).send(challenge);
   }
 
+  logger.warn('❌ Instagram webhook verification failed');
   return res.status(403).json({ error: 'Forbidden' });
 });
 
-// ─── POST /api/webhook/instagram — Receive events ────────────────────────────
+// ─────────────────────────────────────────────
+// ✅ INSTAGRAM WEBHOOK EVENTS (POST)
+// ─────────────────────────────────────────────
 router.post('/instagram', async (req: Request, res: Response) => {
-  // Respond immediately to Meta
+  // respond immediately (IMPORTANT for Meta)
   res.status(200).json({ status: 'ok' });
 
-  const body = req.body;
-  if (body.object !== 'instagram') return;
+  try {
+    const body = req.body;
 
-  for (const entry of body.entry || []) {
-    const pageId = entry.id;
+    if (!body || body.object !== 'instagram') {
+      return;
+    }
 
-    // Find the account — match on igUserId (entry.id is the IG User ID)
-    const igAccount = await prisma.instagramAccount.findFirst({
-      where: { igUserId: pageId, automationOn: true, isActive: true },
-      include: { user: { include: { aiSettings: true } } },
-    });
+    for (const entry of body.entry || []) {
+      const igId = entry.id;
 
-    if (!igAccount) continue;
+      logger.info(`🔥 Instagram webhook IG ID: ${igId}`);
 
-    // Mark webhook as verified on first real event
-    if (!igAccount.webhookVerified) {
-      await prisma.instagramAccount.update({
-        where: { id: igAccount.id },
-        data: { webhookVerified: true },
+      // ─────────────────────────────
+      // 🔥 FIND INSTAGRAM ACCOUNT
+      // ─────────────────────────────
+      const igAccount = await prisma.instagramAccount.findFirst({
+        where: {
+          igUserId: igId,
+          automationOn: true,
+          isActive: true,
+        },
+        include: {
+          user: {
+            include: {
+              aiSettings: true,
+            },
+          },
+        },
       });
-    }
 
-    // Handle DMs
-    for (const messaging of entry.messaging || []) {
-      if (messaging.message && !messaging.message.is_echo) {
-        await automationQueue.add('process-dm', {
-          userId: igAccount.userId,
-          igAccountId: igAccount.id,
-          senderId: messaging.sender.id,
-          message: messaging.message.text || '',
-          messageId: messaging.message.mid,
-          timestamp: messaging.timestamp,
+      if (!igAccount) {
+        logger.warn(`❌ No IG account matched for ID: ${igId}`);
+        continue;
+      }
+
+      logger.info(`✅ IG account found: ${igAccount.id}`);
+
+      // ─────────────────────────────
+      // mark webhook verified
+      // ─────────────────────────────
+      if (!igAccount.webhookVerified) {
+        await prisma.instagramAccount.update({
+          where: { id: igAccount.id },
+          data: { webhookVerified: true },
         });
       }
-    }
 
-    // Handle Comments
-    for (const change of entry.changes || []) {
-      if (change.field === 'comments' && change.value?.verb === 'add') {
-        await automationQueue.add('process-comment', {
-          userId: igAccount.userId,
-          igAccountId: igAccount.id,
-          commentId: change.value.id,
-          commentText: change.value.text,
-          senderId: change.value.from?.id,
-          senderName: change.value.from?.name,
-          mediaId: change.value.media?.id,
-          timestamp: change.value.created_time,
-        });
+      // ─────────────────────────────
+      // 📩 MESSAGES (DM)
+      // ─────────────────────────────
+      for (const messaging of entry.messaging || []) {
+        if (messaging.message && !messaging.message.is_echo) {
+          await automationQueue.add('process-dm', {
+            userId: igAccount.userId,
+            igAccountId: igAccount.id,
+            senderId: messaging.sender.id,
+            message: messaging.message.text || '',
+            messageId: messaging.message.mid,
+            timestamp: messaging.timestamp,
+          });
+
+          logger.info(`📩 DM queued for user ${igAccount.userId}`);
+        }
+      }
+
+      // ─────────────────────────────
+      // 💬 COMMENTS
+      // ─────────────────────────────
+      for (const change of entry.changes || []) {
+        if (
+          change.field === 'comments' &&
+          change.value?.verb === 'add'
+        ) {
+          await automationQueue.add('process-comment', {
+            userId: igAccount.userId,
+            igAccountId: igAccount.id,
+            commentId: change.value.id,
+            commentText: change.value.text,
+            senderId: change.value.from?.id,
+            senderName: change.value.from?.name,
+            mediaId: change.value.media?.id,
+            timestamp: change.value.created_time,
+          });
+
+          logger.info(`💬 Comment queued for user ${igAccount.userId}`);
+        }
       }
     }
+  } catch (err) {
+    logger.error('❌ Instagram webhook error:', err);
   }
 });
 
-// ─── POST /api/webhook/stripe ─────────────────────────────────────────────────
+// ─────────────────────────────────────────────
+// 💳 STRIPE WEBHOOK
+// ─────────────────────────────────────────────
 router.post('/stripe', async (req: Request, res: Response) => {
   const sig = req.headers['stripe-signature'] as string;
 
   let event: Stripe.Event;
+
   try {
     event = stripe.webhooks.constructEvent(
       req.body,
@@ -96,7 +146,7 @@ router.post('/stripe', async (req: Request, res: Response) => {
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
 
-  logger.info('Stripe event received:', event.type);
+  logger.info(`💳 Stripe event: ${event.type}`);
 
   try {
     switch (event.type) {
@@ -123,15 +173,16 @@ router.post('/stripe', async (req: Request, res: Response) => {
         const user = await prisma.user.findFirst({
           where: { stripeCustomerId: sub.customer as string },
         });
-        if (!user) break;
 
-        await prisma.user.update({
-          where: { id: user.id },
-          data: {
-            stripeSubId: sub.id,
-            subStatus: sub.status,
-          },
-        });
+        if (user) {
+          await prisma.user.update({
+            where: { id: user.id },
+            data: {
+              stripeSubId: sub.id,
+              subStatus: sub.status,
+            },
+          });
+        }
         break;
       }
 
@@ -140,17 +191,21 @@ router.post('/stripe', async (req: Request, res: Response) => {
         const user = await prisma.user.findFirst({
           where: { stripeCustomerId: sub.customer as string },
         });
-        if (!user) break;
 
-        await prisma.user.update({
-          where: { id: user.id },
-          data: { subStatus: 'canceled', subPlan: 'free' },
-        });
+        if (user) {
+          await prisma.user.update({
+            where: { id: user.id },
+            data: {
+              subStatus: 'canceled',
+              subPlan: 'free',
+            },
+          });
 
-        await prisma.instagramAccount.updateMany({
-          where: { userId: user.id },
-          data: { automationOn: false },
-        });
+          await prisma.instagramAccount.updateMany({
+            where: { userId: user.id },
+            data: { automationOn: false },
+          });
+        }
         break;
       }
 
@@ -159,6 +214,7 @@ router.post('/stripe', async (req: Request, res: Response) => {
         const user = await prisma.user.findFirst({
           where: { stripeCustomerId: invoice.customer as string },
         });
+
         if (user) {
           await prisma.user.update({
             where: { id: user.id },
@@ -168,37 +224,11 @@ router.post('/stripe', async (req: Request, res: Response) => {
         break;
       }
     }
-
-    // Log billing event
-    const userId = await getUserIdFromStripeEvent(event);
-    if (userId) {
-      await prisma.billingEvent.create({
-        data: {
-          userId,
-          stripeEventId: event.id,
-          type: event.type,
-          status: 'processed',
-          metadata: event.data.object as any,
-        },
-      });
-    }
   } catch (err) {
-    logger.error('Error processing Stripe event:', err);
+    logger.error('Stripe processing error:', err);
   }
 
   res.json({ received: true });
 });
-
-async function getUserIdFromStripeEvent(event: Stripe.Event): Promise<string | null> {
-  const obj = event.data.object as any;
-  const customerId = obj.customer;
-  if (!customerId) return null;
-
-  const user = await prisma.user.findFirst({
-    where: { stripeCustomerId: customerId },
-    select: { id: true },
-  });
-  return user?.id || null;
-}
 
 export default router;
