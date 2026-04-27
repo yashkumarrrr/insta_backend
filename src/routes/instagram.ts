@@ -173,7 +173,7 @@ router.get('/callback', authRateLimit, async (req: Request, res: Response) => {
     // ✅ accountInfo.page_id = Facebook Page ID
     // ✅ accountInfo.page_access_token = Page token (needed for DMs)
 
-    const tokenExpiry = new Date(Date.now() + expires_in * 1000);
+    const tokenExpiry = expires_in ? new Date(Date.now() + expires_in * 1000) : null;
 
     await prisma.instagramAccount.upsert({
       where: { userId },
