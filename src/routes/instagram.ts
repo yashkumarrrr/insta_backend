@@ -305,5 +305,24 @@ router.get(
     }
   }
 );
-
+// ─── TEMP: Check page subscription ───────────────────────────────────────
+router.get('/check-subscription', authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    const account = await prisma.instagramAccount.findUnique({
+      where: { userId: req.user!.id },
+    });
+    if (!account?.pageId || !account?.pageToken) {
+      return res.json({ error: 'No pageId or pageToken' });
+    }
+    const pageToken = decrypt(account.pageToken);
+    const axios = require('axios');
+    const result = await axios.get(
+      `https://graph.facebook.com/v21.0/${account.pageId}/subscribed_apps`,
+      { params: { access_token: pageToken } }
+    );
+    res.json(result.data);
+  } catch (err: any) {
+    res.json({ error: err.response?.data || err.message });
+  }
+});
 export default router;
