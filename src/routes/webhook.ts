@@ -66,8 +66,6 @@ router.post('/instagram', async (req: Request, res: Response) => {
       }
 
       logger.info(`✅ IG account found: ${igAccount.id}`);
-
-      // ─── DEBUG: log raw entry ───────────────────────────
       logger.info(`📦 Raw entry: ${JSON.stringify(entry).substring(0, 800)}`);
 
       if (!igAccount.webhookVerified) {
@@ -81,6 +79,11 @@ router.post('/instagram', async (req: Request, res: Response) => {
       // 📩 MESSAGES (DM)
       // ─────────────────────────────
       for (const messaging of entry.messaging || []) {
+        // Skip edits, reads, reactions — only process new messages
+        if (messaging.message_edit) continue;
+        if (messaging.read) continue;
+        if (messaging.reaction) continue;
+
         if (messaging.message && !messaging.message.is_echo) {
           await automationQueue.add('process-dm', {
             userId: igAccount.userId,
