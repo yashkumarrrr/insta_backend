@@ -147,7 +147,7 @@ router.get('/callback', authRateLimit, async (req: Request, res: Response) => {
     const tokenExpiry = expires_in ? new Date(Date.now() + expires_in * 1000) : null;
 
     await prisma.instagramAccount.upsert({
-      where: { userId },
+      where: { igUserId: accountInfo.id },
       create: {
         userId,
         igUserId: accountInfo.id,
