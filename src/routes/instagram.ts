@@ -344,4 +344,73 @@ router.get('/debug-subscription', async (req: Request, res: Response) => {
     res.json({ error: err.response?.data || err.message });
   }
 });
+// ─── TEMP: Test API call for Meta App Review ──────────────────────────────
+router.get('/test-api-call', async (req: Request, res: Response) => {
+  try {
+    const account = await prisma.instagramAccount.findFirst({
+      where: { isActive: true },
+    });
+
+    if (!account?.pageToken) {
+      return res.json({ error: 'No page token found' });
+    }
+
+    const pageToken = decrypt(account.pageToken);
+    const axios = require('axios');
+
+    // Step 1 — get media
+    const mediaRes = await axios.get(
+      `https://graph.facebook.com/v21.0/${account.igUserId}/media`,
+      { params: { access_token: pageToken, fields: 'id,caption' } }
+    );
+
+    const posts = mediaRes.data?.data;
+    if (!posts?.length) {
+      return res.json({ error: 'No posts found — create a post on Instagram first' });
+    }
+
+    const postId = posts[0].id;
+
+    // Step 2 — get comments on that post
+    const commentsRes = await axios.get(
+      `https://graph.facebook.com/v21.0/${postId}/comments`,
+      { params: { access_token: pageToken, fields: 'id,text,username' } }
+    );
+
+    const comments = commentsRes.data?.data;
+    if (!comments?.length) {
+      return res.json({ 
+        error: 'No comments found — comment on your post first then call this again',
+        postId,
+        postUrl: `https://www.instagram.com/p/${postId}/`
+      });
+    }
+
+    const commentId = comments[0].id;
+
+    // Step 3 — THIS IS THE REQUIRED CALL: reply to comment
+    const replyRes = await axios.post(
+      `https://graph.facebook.com/v21.0/${commentId}/replies`,
+      null,
+      {
+        params: {
+          access_token: pageToken,
+          message: 'Thank you for your comment! 🙌',
+        }
+      }
+    );
+
+    return res.json({
+      success: true,
+      message: 'API call made successfully — check Meta App Review now',
+      commentId,
+      replyId: replyRes.data?.id,
+    });
+
+  } catch (err: any) {
+    return res.json({ 
+      error: err.response?.data || err.message 
+    });
+  }
+});
 export default router;
