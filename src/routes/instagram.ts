@@ -362,52 +362,81 @@ router.get('/test-api-call', async (req: Request, res: Response) => {
     const pageToken = decrypt(account.pageToken);
     const axios = require('axios');
 
-    // Step 1 — get media
+    // Step 1 — get media using IG Business API
     const mediaRes = await axios.get(
       `https://graph.facebook.com/v21.0/${account.igUserId}/media`,
-      { params: { access_token: pageToken, fields: 'id,caption' } }
+      { 
+        params: { 
+          access_token: pageToken, 
+          fields: 'id,caption,comments_count,like_count' 
+        } 
+      }
     );
 
     const posts = mediaRes.data?.data;
     if (!posts?.length) {
-      return res.json({ error: 'No posts found — create a post on Instagram first' });
+      return res.json({ error: 'No posts found' });
     }
 
     const postId = posts[0].id;
 
-    // Step 2 — get comments on that post
+    // Step 2 — get comments
     const commentsRes = await axios.get(
       `https://graph.facebook.com/v21.0/${postId}/comments`,
-      { params: { access_token: pageToken, fields: 'id,text,username' } }
+      { 
+        params: { 
+          access_token: pageToken, 
+          fields: 'id,text,username,timestamp' 
+        } 
+      }
     );
 
     const comments = commentsRes.data?.data;
     if (!comments?.length) {
       return res.json({ 
-        error: 'No comments found — comment on your post first then call this again',
-        postId,
-        postUrl: `https://www.instagram.com/p/${postId}/`
+        error: 'No comments — comment on your post first',
+        postId 
       });
     }
 
     const commentId = comments[0].id;
 
-    // Step 3 — THIS IS THE REQUIRED CALL: reply to comment
+    // Step 3 — CREATE a comment on the post (not reply)
+    // This is what Meta tracks for instagram_business_manage_comments
+    const createCommentRes = await axios.post(
+      `https://graph.facebook.com/v21.0/${postId}/comments`,
+      {
+        message: 'Great post! Thanks for sharing 🙌',
+        access_token: pageToken,
+      }
+    );
+
+    // Step 4 — DELETE that comment immediately (cleanup)
+    const newCommentId = createCommentRes.data?.id;
+    if (newCommentId) {
+      await axios.delete(
+        `https://graph.facebook.com/v21.0/${newCommentId}`,
+        { params: { access_token: pageToken } }
+      );
+    }
+
+    // Step 5 — REPLY to existing comment
     const replyRes = await axios.post(
       `https://graph.facebook.com/v21.0/${commentId}/replies`,
-      null,
       {
-        params: {
-          access_token: pageToken,
-          message: 'Thank you for your comment! 🙌',
-        }
+        message: 'Thank you so much! 💜',
+        access_token: pageToken,
       }
     );
 
     return res.json({
       success: true,
-      message: 'API call made successfully — check Meta App Review now',
-      commentId,
+      operations: {
+        read_comments: '✅',
+        create_comment: '✅',
+        delete_comment: '✅',
+        reply_to_comment: '✅',
+      },
       replyId: replyRes.data?.id,
     });
 
