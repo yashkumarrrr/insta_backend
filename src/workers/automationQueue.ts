@@ -86,12 +86,21 @@ automationQueue.process('process-dm', 5, async (job) => {
       include: { messages: { orderBy: { sentAt: 'desc' }, take: 10 } },
     });
 
-    if (!conversation) {
-      conversation = await prisma.conversation.create({
-        data: { userId, igUserId: senderId, source: 'dm' },
-        include: { messages: { orderBy: { sentAt: 'desc' }, take: 10 } },
-      });
-    }
+if (!conversation) {
+  // Fetch real username from Instagram API before saving
+  let igUsername: string | null = null;
+  try {
+    const profile = await igService.getUserProfile(senderId);
+    igUsername = profile?.username ?? null;
+  } catch {
+    igUsername = null; // not critical, continue without it
+  }
+
+  conversation = await prisma.conversation.create({
+    data: { userId, igUserId: senderId, igUsername, source: 'dm' },
+    include: { messages: { orderBy: { sentAt: 'desc' }, take: 10 } },
+  });
+}
 
     if (!conversation.automationOn) {
       logger.info('Conversation automation paused', { conversationId: conversation.id });
