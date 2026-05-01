@@ -103,8 +103,8 @@ router.post('/instagram', async (req: Request, res: Response) => {
       // ─────────────────────────────
       for (const change of entry.changes || []) {
         if (
-          change.field === 'comments' &&
-          change.value?.verb === 'add'
+          (change.field === 'comments' || change.field === 'feed') && 
+           change.value?.verb === 'add'
         ) {
           await automationQueue.add('process-comment', {
             userId: igAccount.userId,
