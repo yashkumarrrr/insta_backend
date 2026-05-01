@@ -29,8 +29,11 @@ automationQueue.on('error', (err) => {
   logger.error('❌ Bull queue error:', err.message);
 });
 
-// Rate limiter state (in-memory; use Redis in production cluster)
+// Rate limiter state
 const rateLimiter: Map<string, { count: number; windowStart: number }> = new Map();
+
+// Username cache — avoids hitting Instagram API repeatedly for same sender
+const usernameCache = new Map<string, string>();
 
 function checkRateLimit(userId: string, type: 'dm' | 'reply', maxPerHour: number): boolean {
   const key = `${userId}:${type}`;
@@ -78,7 +81,10 @@ automationQueue.process('process-dm', 5, async (job) => {
 
     if (senderId === igAccount.igUserId) return;
 
-    const token = igAccount.pageToken ? decrypt(igAccount.pageToken) : decrypt(igAccount.accessToken);
+    const token = igAccount.pageToken
+      ? decrypt(igAccount.pageToken)
+      : decrypt(igAccount.accessToken);
+
     const igService = new InstagramService(token, igAccount.igUserId, igAccount.pageId);
 
     let conversation = await prisma.conversation.findFirst({
@@ -86,63 +92,90 @@ automationQueue.process('process-dm', 5, async (job) => {
       include: { messages: { orderBy: { sentAt: 'desc' }, take: 10 } },
     });
 
-if (!conversation) {
-  // Fetch real username from Instagram API before saving
-  let igUsername: string | null = null;
-  try {
-    const profile = await igService.getUserProfile(senderId);
-    igUsername = profile?.username ?? null;
-  } catch {
-    igUsername = null; // not critical, continue without it
-  }
+    if (!conversation) {
+      // Fetch real username — check cache first to avoid extra API calls
+      let igUsername: string | null = usernameCache.get(senderId) ?? null;
 
-  conversation = await prisma.conversation.create({
-    data: { userId, igUserId: senderId, igUsername, source: 'dm' },
-    include: { messages: { orderBy: { sentAt: 'desc' }, take: 10 } },
-  });
-}
+      if (!igUsername) {
+        try {
+          const profile = await igService.getUserProfile(senderId);
+          igUsername = profile?.username ?? null;
+          if (igUsername) usernameCache.set(senderId, igUsername);
+        } catch {
+          igUsername = null;
+        }
+      }
+
+      conversation = await prisma.conversation.create({
+        data: { userId, igUserId: senderId, igUsername, source: 'dm' },
+        include: { messages: { orderBy: { sentAt: 'desc' }, take: 10 } },
+      });
+    }
+
+    // Backfill username on existing conversations that have null
+    if (conversation && !conversation.igUsername) {
+      let igUsername: string | null = usernameCache.get(senderId) ?? null;
+      if (!igUsername) {
+        try {
+          const profile = await igService.getUserProfile(senderId);
+          igUsername = profile?.username ?? null;
+          if (igUsername) usernameCache.set(senderId, igUsername);
+        } catch {
+          igUsername = null;
+        }
+      }
+      if (igUsername) {
+        await prisma.conversation.update({
+          where: { id: conversation.id },
+          data: { igUsername },
+        });
+        conversation.igUsername = igUsername;
+      }
+    }
 
     if (!conversation.automationOn) {
       logger.info('Conversation automation paused', { conversationId: conversation.id });
       return;
     }
 
-await prisma.message.upsert({
-  where: { igMessageId: messageId },
-  create: {
-    conversationId: conversation.id,
-    igMessageId: messageId,
-    direction: 'inbound',
-    senderType: 'user',
-    content: message,
-  },
-  update: {}, // already saved — do nothing on retry
-});
+    // Idempotent inbound message save — safe on Bull retries
+    await prisma.message.upsert({
+      where: { igMessageId: messageId },
+      create: {
+        conversationId: conversation.id,
+        igMessageId: messageId,
+        direction: 'inbound',
+        senderType: 'user',
+        content: message,
+      },
+      update: {},
+    });
 
     const { isLead } = await detectIntent(message);
 
-const businessContext = [
-  aiSettings?.businessName,
-  aiSettings?.businessDescription,
-  aiSettings?.productDetails,
-].filter(Boolean).join('. ') || 'Instagram automation tool for creators';
+    // Filter time-wasters before spending tokens on a reply
+    const businessContext = [
+      aiSettings?.businessName,
+      aiSettings?.businessDescription,
+      aiSettings?.productDetails,
+    ].filter(Boolean).join('. ') || 'Instagram automation tool for creators';
 
-const { reply: shouldReplyToThis, reason } = await shouldReply(message, businessContext);
+    const { reply: shouldReplyToThis, reason } = await shouldReply(message, businessContext);
 
-if (!shouldReplyToThis) {
-  logger.info('🚫 Message filtered — not replying', { senderId, message, reason });
-  await prisma.automationLog.create({
-    data: {
-      userId,
-      type: 'filtered',
-      status: 'skipped',
-      source: 'dm',
-      igUserId: senderId,
-      response: `Filtered: ${reason}`,
-    },
-  });
-  return;
-}
+    if (!shouldReplyToThis) {
+      logger.info('🚫 Message filtered — not replying', { senderId, message, reason });
+      await prisma.automationLog.create({
+        data: {
+          userId,
+          type: 'filtered',
+          status: 'skipped',
+          source: 'dm',
+          igUserId: senderId,
+          response: `Filtered: ${reason}`,
+        },
+      });
+      return;
+    }
 
     const history = conversation.messages
       .reverse()
@@ -165,7 +198,8 @@ if (!shouldReplyToThis) {
       {
         incomingMessage: message,
         source: 'dm',
-        igUsername: senderId,
+        // Pass real username — falls back to senderId only if username truly unavailable
+        igUsername: conversation.igUsername ?? senderId,
         conversationHistory: history,
       }
     );
@@ -193,20 +227,21 @@ if (!shouldReplyToThis) {
     });
 
     if (isLead && !conversation.isLead) {
-await prisma.lead.upsert({
-  where: { conversationId: conversation.id },
-  create: {
-    userId,
-    conversationId: conversation.id,
-    igUserId: senderId,
-    igUsername: conversation.igUsername ?? null,  // ← add this
-    source: 'dm',
-    status: 'new',
-  },
-  update: {
-    igUsername: conversation.igUsername ?? null,  // ← update if it comes in later
-  },
-});    }
+      await prisma.lead.upsert({
+        where: { conversationId: conversation.id },
+        create: {
+          userId,
+          conversationId: conversation.id,
+          igUserId: senderId,
+          igUsername: conversation.igUsername ?? null,
+          source: 'dm',
+          status: 'new',
+        },
+        update: {
+          igUsername: conversation.igUsername ?? null,
+        },
+      });
+    }
 
     await prisma.automationLog.create({
       data: {
@@ -251,10 +286,11 @@ automationQueue.process('process-comment', 3, async (job) => {
 
     if (senderId === igAccount.igUserId) return;
 
-    const token = igAccount.pageToken 
-      ? decrypt(igAccount.pageToken) 
+    const token = igAccount.pageToken
+      ? decrypt(igAccount.pageToken)
       : decrypt(igAccount.accessToken);
-    const igService = new InstagramService(token, igAccount.igUserId);
+
+    const igService = new InstagramService(token, igAccount.igUserId, igAccount.pageId);
 
     const reply = await generateCommentReply(
       {
@@ -267,7 +303,7 @@ automationQueue.process('process-comment', 3, async (job) => {
         customInstructions: aiSettings.customInstructions || undefined,
       },
       commentText,
-      senderName || null,  // ← pass null so your AI prompt doesn't use the ID
+      senderName || null,
     );
 
     await igService.replyToComment(commentId, reply);
