@@ -68,6 +68,13 @@ router.post('/instagram', async (req: Request, res: Response) => {
       logger.info(`✅ IG account found: ${igAccount.id}`);
       logger.info(`📦 Raw entry: ${JSON.stringify(entry).substring(0, 800)}`);
 
+      // ADD THESE 4 LINES:
+      logger.info(`📋 Changes count: ${entry.changes?.length || 0}`);
+      logger.info(`📋 Messaging count: ${entry.messaging?.length || 0}`);
+      for (const change of entry.changes || []) {
+       logger.info(`📋 Change field: "${change.field}", verb: "${change.value?.verb}"`);
+      }
+
       if (!igAccount.webhookVerified) {
         await prisma.instagramAccount.update({
           where: { id: igAccount.id },
