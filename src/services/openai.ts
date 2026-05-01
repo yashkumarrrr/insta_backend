@@ -40,7 +40,6 @@ const GOAL_GUIDES: Record<string, string> = {
 // Returns true only if the string looks like a real username, not a numeric ID
 function isValidUsername(name: string): boolean {
   if (!name) return false;
-  // Numeric-only strings are internal Meta IDs, not usernames
   if (/^\d+$/.test(name)) return false;
   return true;
 }
@@ -78,7 +77,7 @@ CRITICAL RULES:
 - If you have a link or resource to share, just share it directly — don't tease it
 - Match their energy — casual = casual, formal = formal, excited = excited
 - End with ONE short question or soft CTA when relevant — never both
-- This is a DIRECT MESSAGE conversation — be direct, warm, and to the point`
+- This is a DIRECT MESSAGE conversation — be direct, warm, and to the point`;
 
   const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
     { role: 'system', content: systemPrompt },
@@ -92,17 +91,16 @@ CRITICAL RULES:
     })));
   }
 
-  // Only show username in prompt if it's a real username, not a numeric ID
   const displayName = isValidUsername(message.igUsername)
     ? `@${message.igUsername}`
     : 'Someone';
 
-messages.push({
-  role: 'user',
-  content: `${displayName} sent you a DM: "${message.incomingMessage}"
+  messages.push({
+    role: 'user',
+    content: `${displayName} sent you a DM: "${message.incomingMessage}"
 
 Reply naturally as the business owner. Be direct and helpful. Do not tell them to DM you — you are already talking.`,
-});
+  });
 
   const response = await openai.chat.completions.create({
     model: 'llama-3.3-70b-versatile',
@@ -129,10 +127,9 @@ Reply naturally as the business owner. Be direct and helpful. Do not tell them t
 export async function generateCommentReply(
   context: AIReplyContext,
   comment: string,
-  igUsername: string | null,   // ← now accepts null so callers don't have to pass the numeric ID
+  igUsername: string | null,
   postCaption?: string
 ): Promise<string> {
-  // Only use the username if it's a real one — never use a numeric Meta ID
   const hasRealName = igUsername && isValidUsername(igUsername);
   const mention = hasRealName ? `@${igUsername}` : '';
 
@@ -196,5 +193,56 @@ export async function detectIntent(message: string): Promise<{
     return JSON.parse(response.choices[0]?.message?.content || '{}');
   } catch {
     return { intent: 'other', isLead: false, sentiment: 'neutral' };
+  }
+}
+
+export async function shouldReply(
+  message: string,
+  businessContext: string
+): Promise<{ reply: boolean; reason: string }> {
+  const response = await openai.chat.completions.create({
+    model: 'llama-3.1-8b-instant',
+    messages: [
+      {
+        role: 'system',
+        content: `You are a smart filter for a business's Instagram DMs.
+Decide if this message deserves a real reply or should be ignored.
+
+Business context: ${businessContext}
+
+Ignore if the message is:
+- Spam or mass promotion ("follow me", "check my page", "collab?", random emojis only)
+- Completely irrelevant to the business
+- Just a greeting with zero intent ("hi", "hello", "hey", "sup" with nothing else)
+- A bot or fake account message
+- Abusive, rude, or trolling
+- A simple reaction like "thanks", "ok", "👍" with no question
+
+Reply if the message:
+- Shows genuine interest in the product or service
+- Has a real question worth answering
+- Shows buying intent
+- Is a complaint that needs handling
+- Is a lead worth nurturing
+- Contains any actual content beyond a single word greeting
+
+When in doubt, reply — it is better to reply than to ignore a real person.
+
+Return JSON only: {"reply": true/false, "reason": "one line explanation"}`,
+      },
+      {
+        role: 'user',
+        content: `Message: "${message}"`,
+      },
+    ],
+    max_tokens: 80,
+    temperature: 0.1,
+    response_format: { type: 'json_object' },
+  });
+
+  try {
+    return JSON.parse(response.choices[0]?.message?.content || '{}');
+  } catch {
+    return { reply: true, reason: 'parse error — defaulting to reply' };
   }
 }
