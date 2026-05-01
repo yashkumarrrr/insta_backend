@@ -128,7 +128,8 @@ export class InstagramService {
   // ─── SEND DM ─────────────────────────────────────────────────────────────
   async sendDM(recipientId: string, message: string) {
     try {
-      const data = await this.post(`${this.igUserId}/messages`, {
+      const senderId = this.pageId ?? this.igUserId;
+      const data = await this.post(`${senderId}/messages`, {
         recipient: { id: recipientId },
         message: { text: message },
       });
