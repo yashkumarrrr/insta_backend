@@ -233,7 +233,7 @@ automationQueue.process('process-comment', 3, async (job) => {
         customInstructions: aiSettings.customInstructions || undefined,
       },
       commentText,
-      senderName || senderId,
+      senderName || null,  // ← pass null so your AI prompt doesn't use the ID
     );
 
     await igService.replyToComment(commentId, reply);
