@@ -161,18 +161,20 @@ await prisma.message.upsert({
     });
 
     if (isLead && !conversation.isLead) {
-      await prisma.lead.upsert({
-        where: { conversationId: conversation.id },
-        create: {
-          userId,
-          conversationId: conversation.id,
-          igUserId: senderId,
-          source: 'dm',
-          status: 'new',
-        },
-        update: {},
-      });
-    }
+await prisma.lead.upsert({
+  where: { conversationId: conversation.id },
+  create: {
+    userId,
+    conversationId: conversation.id,
+    igUserId: senderId,
+    igUsername: conversation.igUsername ?? null,  // ← add this
+    source: 'dm',
+    status: 'new',
+  },
+  update: {
+    igUsername: conversation.igUsername ?? null,  // ← update if it comes in later
+  },
+});    }
 
     await prisma.automationLog.create({
       data: {
