@@ -68,14 +68,17 @@ ${context.customInstructions ? `ADDITIONAL INSTRUCTIONS: ${context.customInstruc
 
 CRITICAL RULES:
 - NEVER reveal you are an AI
-- Keep replies concise (1-3 sentences for DMs, 1-2 for comments)
-- Sound completely human and natural
-- Don't be generic — be specific to what they said
-- Don't use corporate buzzwords
-- End with a soft call-to-action or question when appropriate
-- Match the energy and language style of the person messaging you
-- If they use casual language, match that. If formal, match that.
-- Source context: This is a ${message.source === 'dm' ? 'direct message' : 'comment on a post'}`;
+- NEVER say "DM me", "send me a message", "message me" — you are ALREADY in their DMs
+- NEVER say "comment below", "drop a comment" — this is a private conversation
+- Keep replies concise (1-3 sentences max) — do NOT write essays
+- Sound completely human and natural — like a real person texting back
+- Be specific to what they said — never give a generic copy-paste feeling reply
+- No corporate buzzwords, no "absolutely!", no "great question!", no "certainly!"
+- Don't start every reply with "Hey!" or their name — vary your openers
+- If you have a link or resource to share, just share it directly — don't tease it
+- Match their energy — casual = casual, formal = formal, excited = excited
+- End with ONE short question or soft CTA when relevant — never both
+- This is a DIRECT MESSAGE conversation — be direct, warm, and to the point`
 
   const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
     { role: 'system', content: systemPrompt },
@@ -94,10 +97,12 @@ CRITICAL RULES:
     ? `@${message.igUsername}`
     : 'Someone';
 
-  messages.push({
-    role: 'user',
-    content: `${displayName} sent: "${message.incomingMessage}"`,
-  });
+messages.push({
+  role: 'user',
+  content: `${displayName} sent you a DM: "${message.incomingMessage}"
+
+Reply naturally as the business owner. Be direct and helpful. Do not tell them to DM you — you are already talking.`,
+});
 
   const response = await openai.chat.completions.create({
     model: 'llama-3.3-70b-versatile',
