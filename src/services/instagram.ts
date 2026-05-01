@@ -23,11 +23,13 @@ export class InstagramService {
   private pageId: string | null;
 
   constructor(accessToken: string, igUserId: string, pageId?: string | null) {
-    ...
+    if (!accessToken) throw new Error('Missing accessToken');
+    if (!igUserId) throw new Error('Missing igUserId');
     this.accessToken = accessToken;
     this.igUserId = igUserId;
     this.pageId = pageId ?? null;
   }
+
 
   // ─── GET REQUEST ─────────────────────────────────────────────────────────
   private async get(endpoint: string, params: Record<string, any> = {}) {
