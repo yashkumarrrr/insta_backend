@@ -79,7 +79,7 @@ automationQueue.process('process-dm', 5, async (job) => {
     if (senderId === igAccount.igUserId) return;
 
     const token = igAccount.pageToken ? decrypt(igAccount.pageToken) : decrypt(igAccount.accessToken);
-    const igService = new InstagramService(token, igAccount.igUserId);
+    const igService = new InstagramService(token, igAccount.igUserId, igAccount.pageId);
 
     let conversation = await prisma.conversation.findFirst({
       where: { userId, igUserId: senderId },
@@ -98,15 +98,17 @@ automationQueue.process('process-dm', 5, async (job) => {
       return;
     }
 
-    await prisma.message.create({
-      data: {
-        conversationId: conversation.id,
-        igMessageId: messageId,
-        direction: 'inbound',
-        senderType: 'user',
-        content: message,
-      },
-    });
+await prisma.message.upsert({
+  where: { igMessageId: messageId },
+  create: {
+    conversationId: conversation.id,
+    igMessageId: messageId,
+    direction: 'inbound',
+    senderType: 'user',
+    content: message,
+  },
+  update: {}, // already saved — do nothing on retry
+});
 
     const { isLead } = await detectIntent(message);
 
