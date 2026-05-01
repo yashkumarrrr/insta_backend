@@ -215,7 +215,9 @@ automationQueue.process('process-comment', 3, async (job) => {
 
     if (senderId === igAccount.igUserId) return;
 
-    const token = decrypt(igAccount.accessToken);
+    const token = igAccount.pageToken 
+      ? decrypt(igAccount.pageToken) 
+      : decrypt(igAccount.accessToken);
     const igService = new InstagramService(token, igAccount.igUserId);
 
     const reply = await generateCommentReply(
