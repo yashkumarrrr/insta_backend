@@ -37,6 +37,14 @@ const GOAL_GUIDES: Record<string, string> = {
   followers: 'Be engaging and interesting. Encourage them to follow, share content, and stay connected.',
 };
 
+// Returns true only if the string looks like a real username, not a numeric ID
+function isValidUsername(name: string): boolean {
+  if (!name) return false;
+  // Numeric-only strings are internal Meta IDs, not usernames
+  if (/^\d+$/.test(name)) return false;
+  return true;
+}
+
 export async function generateAIReply(
   context: AIReplyContext,
   message: MessageContext
@@ -73,18 +81,22 @@ CRITICAL RULES:
     { role: 'system', content: systemPrompt },
   ];
 
-  // Add conversation history for context
   if (message.conversationHistory?.length) {
-    const recentHistory = message.conversationHistory.slice(-6); // Last 6 messages
+    const recentHistory = message.conversationHistory.slice(-6);
     messages.push(...recentHistory.map(m => ({
       role: m.role as 'user' | 'assistant',
       content: m.content,
     })));
   }
 
+  // Only show username in prompt if it's a real username, not a numeric ID
+  const displayName = isValidUsername(message.igUsername)
+    ? `@${message.igUsername}`
+    : 'Someone';
+
   messages.push({
     role: 'user',
-    content: `${message.igUsername} sent: "${message.incomingMessage}"`,
+    content: `${displayName} sent: "${message.incomingMessage}"`,
   });
 
   const response = await openai.chat.completions.create({
@@ -112,9 +124,13 @@ CRITICAL RULES:
 export async function generateCommentReply(
   context: AIReplyContext,
   comment: string,
-  igUsername: string,
+  igUsername: string | null,   // ← now accepts null so callers don't have to pass the numeric ID
   postCaption?: string
 ): Promise<string> {
+  // Only use the username if it's a real one — never use a numeric Meta ID
+  const hasRealName = igUsername && isValidUsername(igUsername);
+  const mention = hasRealName ? `@${igUsername}` : '';
+
   const systemPrompt = `You are responding to a comment on your Instagram post as a business owner.
 
 BUSINESS: ${context.businessName || 'My Business'}
@@ -126,13 +142,13 @@ Rules:
 - Reply to comments publicly (these are visible to everyone)
 - Be concise (1-2 sentences max)
 - Sound human and natural
-- Use @${igUsername} to address them if appropriate
+${hasRealName ? `- You may address them as ${mention} if it feels natural` : '- Do not address by name — their username is not available'}
 - Encourage further engagement
 - NEVER reveal you are AI`;
 
   const userPrompt = postCaption
-    ? `Post caption: "${postCaption}"\n\n@${igUsername} commented: "${comment}"`
-    : `@${igUsername} commented: "${comment}"`;
+    ? `Post caption: "${postCaption}"\n\n${hasRealName ? mention : 'Someone'} commented: "${comment}"`
+    : `${hasRealName ? mention : 'Someone'} commented: "${comment}"`;
 
   const response = await openai.chat.completions.create({
     model: 'llama-3.3-70b-versatile',
