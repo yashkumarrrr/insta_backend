@@ -1,7 +1,7 @@
 import Bull from 'bull';
 import { prisma } from '../utils/prisma';
 import { InstagramService } from '../services/instagram';
-import { generateAIReply, generateCommentReply, detectIntent } from '../services/openai';
+import { generateAIReply, generateCommentReply, detectIntent, shouldReply } from '../services/openai';
 import { decrypt } from '../utils/encryption';
 import { logger } from '../utils/logger';
 
@@ -120,6 +120,29 @@ await prisma.message.upsert({
 });
 
     const { isLead } = await detectIntent(message);
+
+const businessContext = [
+  aiSettings?.businessName,
+  aiSettings?.businessDescription,
+  aiSettings?.productDetails,
+].filter(Boolean).join('. ') || 'Instagram automation tool for creators';
+
+const { reply: shouldReplyToThis, reason } = await shouldReply(message, businessContext);
+
+if (!shouldReplyToThis) {
+  logger.info('🚫 Message filtered — not replying', { senderId, message, reason });
+  await prisma.automationLog.create({
+    data: {
+      userId,
+      type: 'filtered',
+      status: 'skipped',
+      source: 'dm',
+      igUserId: senderId,
+      response: `Filtered: ${reason}`,
+    },
+  });
+  return;
+}
 
     const history = conversation.messages
       .reverse()
