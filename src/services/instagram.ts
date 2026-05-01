@@ -143,6 +143,19 @@ export class InstagramService {
     }
   }
 
+    // ─── GET USER PROFILE ─────────────────────────────────────────────────────
+  async getUserProfile(igUserId: string) {
+    try {
+      const data = await this.get(`${igUserId}`, {
+        fields: 'id,username,name,profile_pic',
+      });
+      return data;
+    } catch (error: any) {
+      logger.error('Failed to get user profile', error.response?.data);
+      return null;
+    }
+  }
+
   // ─── REPLY TO COMMENT ────────────────────────────────────────────────────
   async replyToComment(commentId: string, message: string) {
     try {
