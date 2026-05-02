@@ -83,7 +83,6 @@ automationQueue.process('process-dm', 5, async (job) => {
   logger.info('Processing DM automation', { userId, senderId });
 
   try {
-    // ─── Subscription check ───────────────────────────────────────────────
     const subscribed = await hasActiveSubscription(userId);
     if (!subscribed) {
       logger.info('⛔ Subscription expired — skipping DM automation', { userId });
@@ -162,7 +161,6 @@ automationQueue.process('process-dm', 5, async (job) => {
       return;
     }
 
-    // Save inbound message (idempotent)
     if (messageId && !isFromComment) {
       await prisma.message.upsert({
         where: { igMessageId: messageId },
@@ -185,7 +183,6 @@ automationQueue.process('process-dm', 5, async (job) => {
       aiReply = keywordResult.reply;
       logger.info('🔑 Keyword reply used for DM', { userId, senderId });
     } else {
-      // Filter time-wasters before spending AI tokens
       const businessContext = [
         aiSettings?.businessName,
         aiSettings?.businessDescription,
@@ -239,7 +236,6 @@ automationQueue.process('process-dm', 5, async (job) => {
 
       logger.info('🤖 AI reply used for DM', { userId, senderId });
 
-      // Update lead status
       if (isLead && !conversation.isLead) {
         await prisma.lead.upsert({
           where: { conversationId: conversation.id },
@@ -312,7 +308,6 @@ automationQueue.process('process-dm', 5, async (job) => {
     throw error;
   }
 });
-That's the only change needed in that file. Deploy and the error spam will stop.
 
 // ─── Process Comment ──────────────────────────────────────────────────────────
 automationQueue.process('process-comment', 3, async (job) => {
@@ -321,7 +316,6 @@ automationQueue.process('process-comment', 3, async (job) => {
   logger.info('Processing comment automation', { userId, commentId });
 
   try {
-    // ─── Subscription check ───────────────────────────────────────────────
     const subscribed = await hasActiveSubscription(userId);
     if (!subscribed) {
       logger.info('⛔ Subscription expired — skipping comment automation', { userId });
@@ -340,7 +334,15 @@ automationQueue.process('process-comment', 3, async (job) => {
       return;
     }
 
+    // Skip own account by ID
     if (senderId === igAccount.igUserId) return;
+
+    // Skip own account by username — prevents loop from own replies
+    if (senderName && igAccount.username &&
+        senderName.toLowerCase() === igAccount.username.toLowerCase()) {
+      logger.info('⏭️ Skipping own reply comment', { senderName });
+      return;
+    }
 
     const token = igAccount.pageToken
       ? decrypt(igAccount.pageToken)
@@ -356,7 +358,6 @@ automationQueue.process('process-comment', 3, async (job) => {
       reply = keywordResult.reply;
       logger.info('🔑 Keyword reply used for comment', { userId, mediaId });
 
-      // Auto DM if configured
       if (keywordResult.autoDM && keywordResult.dmReply && senderId) {
         await automationQueue.add('process-keyword-dm', {
           userId,
@@ -394,7 +395,6 @@ automationQueue.process('process-comment', 3, async (job) => {
       },
     });
 
-    // Auto DM from AI settings (existing feature)
     if (aiSettings.autoSendDMs && !keywordResult.reply) {
       await automationQueue.add('process-dm', {
         userId, senderId,
@@ -422,7 +422,6 @@ automationQueue.process('process-keyword-dm', 5, async (job) => {
   const { userId, senderId, message } = job.data;
 
   try {
-    // ─── Subscription check ───────────────────────────────────────────────
     const subscribed = await hasActiveSubscription(userId);
     if (!subscribed) {
       logger.info('⛔ Subscription expired — skipping keyword DM', { userId });
@@ -434,6 +433,12 @@ automationQueue.process('process-keyword-dm', 5, async (job) => {
     });
 
     if (!igAccount?.accessToken) return;
+
+    // Skip own account
+    if (senderId === igAccount.igUserId) {
+      logger.info('⏭️ Skipping keyword DM — sender is own account', { userId });
+      return;
+    }
 
     const token = igAccount.pageToken
       ? decrypt(igAccount.pageToken)
@@ -455,6 +460,14 @@ automationQueue.process('process-keyword-dm', 5, async (job) => {
 
     logger.info('✅ Keyword DM sent', { userId, senderId });
   } catch (error: any) {
+    // Don't retry Meta permission errors
+    if (error.message?.includes('capability') ||
+        error.message?.includes('(#3)') ||
+        error.message?.includes('Advanced Access') ||
+        error.message?.includes('OAuthException')) {
+      logger.warn('⚠️ DM permission not approved — skipping retry', { userId, senderId });
+      return;
+    }
     logger.error('❌ Keyword DM error:', error);
     throw error;
   }
