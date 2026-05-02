@@ -5,8 +5,7 @@ RUN apk add --no-cache openssl
 WORKDIR /app
 
 COPY package*.json ./
-RUN npm install && npm install dodopayments @dodopayments/express
-
+RUN npm install && npm install dodopayments
 COPY . .
 
 RUN npx prisma generate
