@@ -18,6 +18,7 @@ import billingRoutes from './routes/billing';
 import dashboardRoutes from './routes/dashboard';
 import conversationRoutes from './routes/conversations';
 import leadsRoutes from './routes/leads';
+import keywordRoutes from './routes/keywords';
 import './workers/automationQueue';
 
 const app = express();
@@ -63,6 +64,8 @@ app.use('/api/billing', billingRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/conversations', conversationRoutes);
 app.use('/api/leads', leadsRoutes);
+app.use('/api/keywords', keywordRoutes); // ← ADD THIS
+
 
 // Health check
 app.get('/health', (req, res) => {
