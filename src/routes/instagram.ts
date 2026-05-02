@@ -73,13 +73,9 @@ router.get('/auth', authRateLimit, authenticate, (req: AuthRequest, res: Respons
     'public_profile',
     'pages_show_list',
     'pages_read_engagement',
-    'pages_manage_metadata',
     'instagram_basic',
     'instagram_manage_comments',
     'instagram_manage_messages',
-    'instagram_business_basic',
-    'instagram_business_manage_comments',
-    'instagram_business_manage_messages',
   ].join(',');
   const url =
     `https://www.facebook.com/v21.0/dialog/oauth` +
@@ -100,13 +96,9 @@ router.get('/auth-url', authRateLimit, authenticate, (req: AuthRequest, res: Res
     'public_profile',
     'pages_show_list',
     'pages_read_engagement',
-    'pages_manage_metadata',
     'instagram_basic',
     'instagram_manage_comments',
     'instagram_manage_messages',
-    'instagram_business_basic',
-    'instagram_business_manage_comments',
-    'instagram_business_manage_messages',
   ].join(',');
   const url =
     `https://www.facebook.com/v21.0/dialog/oauth` +
