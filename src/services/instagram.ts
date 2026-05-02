@@ -130,8 +130,9 @@ export class InstagramService {
   // ─── SEND DM ─────────────────────────────────────────────────────────────
   async sendDM(recipientId: string, message: string) {
     try {
-      const senderId = this.igUserId;
-      const data = await this.post(`${senderId}/messages`, {
+      // ✅ Instagram Messaging API requires igUserId (NOT pageId) as sender
+      // Endpoint: /{ig-user-id}/messages with page access token
+      const data = await this.post(`${this.igUserId}/messages`, {
         recipient: { id: recipientId },
         message: { text: message },
       });
@@ -228,7 +229,7 @@ export class InstagramService {
       await axios.post(`${BASE_URL}/${pageId}/subscribed_apps`, null, {
         params: {
           access_token: pageToken,
-          subscribed_fields: 'messages,feed,messaging_postbacks,message_reactions,message_edits,messaging_seen',
+          subscribed_fields: 'messages,messaging_postbacks,message_reactions,message_edits,message_reads,standby',
         },
       });
       logger.info('Webhooks subscribed for page', { pageId });
