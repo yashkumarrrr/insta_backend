@@ -32,6 +32,8 @@ model User {
   leads             Lead[]
   automationLogs    AutomationLog[]
   billingEvents     BillingEvent[]
+  keywordRules      KeywordRule[]    // ← ADD THIS LINE
+
 
   @@map("users")
 }
