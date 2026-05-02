@@ -4,6 +4,7 @@ import { InstagramService } from '../services/instagram';
 import { generateAIReply, generateCommentReply, detectIntent, shouldReply } from '../services/openai';
 import { decrypt } from '../utils/encryption';
 import { logger } from '../utils/logger';
+import { findKeywordReply } from '../utils/keywordMatcher';
 
 const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
 
@@ -32,7 +33,7 @@ automationQueue.on('error', (err) => {
 // Rate limiter state
 const rateLimiter: Map<string, { count: number; windowStart: number }> = new Map();
 
-// Username cache — avoids hitting Instagram API repeatedly for same sender
+// Username cache
 const usernameCache = new Map<string, string>();
 
 function checkRateLimit(userId: string, type: 'dm' | 'reply', maxPerHour: number): boolean {
@@ -57,7 +58,7 @@ function checkRateLimit(userId: string, type: 'dm' | 'reply', maxPerHour: number
 
 // ─── Process DM ───────────────────────────────────────────────────────────────
 automationQueue.process('process-dm', 5, async (job) => {
-  const { userId, senderId, message, messageId } = job.data;
+  const { userId, senderId, message, messageId, isFromComment } = job.data;
 
   logger.info('Processing DM automation', { userId, senderId });
 
@@ -93,9 +94,7 @@ automationQueue.process('process-dm', 5, async (job) => {
     });
 
     if (!conversation) {
-      // Fetch real username — check cache first to avoid extra API calls
       let igUsername: string | null = usernameCache.get(senderId) ?? null;
-
       if (!igUsername) {
         try {
           const profile = await igService.getUserProfile(senderId);
@@ -105,14 +104,12 @@ automationQueue.process('process-dm', 5, async (job) => {
           igUsername = null;
         }
       }
-
       conversation = await prisma.conversation.create({
         data: { userId, igUserId: senderId, igUsername, source: 'dm' },
         include: { messages: { orderBy: { sentAt: 'desc' }, take: 10 } },
       });
     }
 
-    // Backfill username on existing conversations that have null
     if (conversation && !conversation.igUsername) {
       let igUsername: string | null = usernameCache.get(senderId) ?? null;
       if (!igUsername) {
@@ -138,71 +135,105 @@ automationQueue.process('process-dm', 5, async (job) => {
       return;
     }
 
-    // Idempotent inbound message save — safe on Bull retries
-    await prisma.message.upsert({
-      where: { igMessageId: messageId },
-      create: {
-        conversationId: conversation.id,
-        igMessageId: messageId,
-        direction: 'inbound',
-        senderType: 'user',
-        content: message,
-      },
-      update: {},
-    });
-
-    const { isLead } = await detectIntent(message);
-
-    // Filter time-wasters before spending tokens on a reply
-    const businessContext = [
-      aiSettings?.businessName,
-      aiSettings?.businessDescription,
-      aiSettings?.productDetails,
-    ].filter(Boolean).join('. ') || 'Instagram automation tool for creators';
-
-    const { reply: shouldReplyToThis, reason } = await shouldReply(message, businessContext);
-
-    if (!shouldReplyToThis) {
-      logger.info('🚫 Message filtered — not replying', { senderId, message, reason });
-      await prisma.automationLog.create({
-        data: {
-          userId,
-          type: 'filtered',
-          status: 'skipped',
-          source: 'dm',
-          igUserId: senderId,
-          response: `Filtered: ${reason}`,
+    // Save inbound message (idempotent)
+    if (messageId && !isFromComment) {
+      await prisma.message.upsert({
+        where: { igMessageId: messageId },
+        create: {
+          conversationId: conversation.id,
+          igMessageId: messageId,
+          direction: 'inbound',
+          senderType: 'user',
+          content: message,
         },
+        update: {},
       });
-      return;
     }
 
-    const history = conversation.messages
-      .reverse()
-      .slice(-6)
-      .map(m => ({
-        role: m.direction === 'inbound' ? ('user' as const) : ('assistant' as const),
-        content: m.content,
-      }));
+    // ─── HYBRID: Keyword first, then AI ──────────────────────────────────────
+    let aiReply: string;
+    const keywordResult = await findKeywordReply(userId, message, 'dm');
 
-    const aiReply = await generateAIReply(
-      {
-        businessName: aiSettings?.businessName || undefined,
-        businessDescription: aiSettings?.businessDescription || undefined,
-        productDetails: aiSettings?.productDetails || undefined,
-        targetAudience: aiSettings?.targetAudience || undefined,
-        goal: aiSettings?.goal || 'engagement',
-        tone: aiSettings?.tone || 'friendly',
-        customInstructions: aiSettings?.customInstructions || undefined,
-      },
-      {
-        incomingMessage: message,
-        source: 'dm',
-        // Pass real username — falls back to senderId only if username truly unavailable
-        igUsername: conversation.igUsername ?? senderId,
-        conversationHistory: history,
+    if (keywordResult.reply) {
+      aiReply = keywordResult.reply;
+      logger.info('🔑 Keyword reply used for DM', { userId, senderId });
+    } else {
+      // Filter time-wasters before spending AI tokens
+      const businessContext = [
+        aiSettings?.businessName,
+        aiSettings?.businessDescription,
+        aiSettings?.productDetails,
+      ].filter(Boolean).join('. ') || 'Instagram automation tool for creators';
+
+      const { reply: shouldReplyToThis, reason } = await shouldReply(message, businessContext);
+
+      if (!shouldReplyToThis) {
+        logger.info('🚫 Message filtered — not replying', { senderId, message, reason });
+        await prisma.automationLog.create({
+          data: {
+            userId,
+            type: 'filtered',
+            status: 'skipped',
+            source: 'dm',
+            igUserId: senderId,
+            response: `Filtered: ${reason}`,
+          },
+        });
+        return;
       }
-    );
+
+      const { isLead } = await detectIntent(message);
+
+      const history = conversation.messages
+        .reverse()
+        .slice(-6)
+        .map(m => ({
+          role: m.direction === 'inbound' ? ('user' as const) : ('assistant' as const),
+          content: m.content,
+        }));
+
+      aiReply = await generateAIReply(
+        {
+          businessName: aiSettings?.businessName || undefined,
+          businessDescription: aiSettings?.businessDescription || undefined,
+          productDetails: aiSettings?.productDetails || undefined,
+          targetAudience: aiSettings?.targetAudience || undefined,
+          goal: aiSettings?.goal || 'engagement',
+          tone: aiSettings?.tone || 'friendly',
+          customInstructions: aiSettings?.customInstructions || undefined,
+        },
+        {
+          incomingMessage: message,
+          source: 'dm',
+          igUsername: conversation.igUsername ?? senderId,
+          conversationHistory: history,
+        }
+      );
+
+      logger.info('🤖 AI reply used for DM', { userId, senderId });
+
+      // Update lead status
+      if (isLead && !conversation.isLead) {
+        await prisma.lead.upsert({
+          where: { conversationId: conversation.id },
+          create: {
+            userId,
+            conversationId: conversation.id,
+            igUserId: senderId,
+            igUsername: conversation.igUsername ?? null,
+            source: 'dm',
+            status: 'new',
+          },
+          update: {
+            igUsername: conversation.igUsername ?? null,
+          },
+        });
+        await prisma.conversation.update({
+          where: { id: conversation.id },
+          data: { isLead: true },
+        });
+      }
+    }
 
     await igService.sendDM(senderId, aiReply);
 
@@ -222,26 +253,8 @@ automationQueue.process('process-dm', 5, async (job) => {
         messageCount: { increment: 2 },
         aiMessageCount: { increment: 1 },
         lastMessageAt: new Date(),
-        isLead: isLead || conversation.isLead,
       },
     });
-
-    if (isLead && !conversation.isLead) {
-      await prisma.lead.upsert({
-        where: { conversationId: conversation.id },
-        create: {
-          userId,
-          conversationId: conversation.id,
-          igUserId: senderId,
-          igUsername: conversation.igUsername ?? null,
-          source: 'dm',
-          status: 'new',
-        },
-        update: {
-          igUsername: conversation.igUsername ?? null,
-        },
-      });
-    }
 
     await prisma.automationLog.create({
       data: {
@@ -267,7 +280,7 @@ automationQueue.process('process-dm', 5, async (job) => {
 
 // ─── Process Comment ──────────────────────────────────────────────────────────
 automationQueue.process('process-comment', 3, async (job) => {
-  const { userId, commentId, commentText, senderId, senderName, mediaId } = job.data;
+  const { userId, igAccountId, commentId, commentText, senderId, senderName, mediaId } = job.data;
 
   logger.info('Processing comment automation', { userId, commentId });
 
@@ -292,19 +305,41 @@ automationQueue.process('process-comment', 3, async (job) => {
 
     const igService = new InstagramService(token, igAccount.igUserId, igAccount.pageId);
 
-    const reply = await generateCommentReply(
-      {
-        businessName: aiSettings.businessName || undefined,
-        businessDescription: aiSettings.businessDescription || undefined,
-        productDetails: aiSettings.productDetails || undefined,
-        targetAudience: aiSettings.targetAudience || undefined,
-        goal: aiSettings.goal,
-        tone: aiSettings.tone,
-        customInstructions: aiSettings.customInstructions || undefined,
-      },
-      commentText,
-      senderName || null,
-    );
+    // ─── HYBRID: Keyword first, then AI ──────────────────────────────────────
+    let reply: string;
+    const keywordResult = await findKeywordReply(userId, commentText, 'comment', mediaId);
+
+    if (keywordResult.reply) {
+      reply = keywordResult.reply;
+      logger.info('🔑 Keyword reply used for comment', { userId, mediaId });
+
+      // Auto DM if configured
+      if (keywordResult.autoDM && keywordResult.dmReply && senderId) {
+        await automationQueue.add('process-keyword-dm', {
+          userId,
+          igAccountId,
+          senderId,
+          message: keywordResult.dmReply,
+        }, { delay: 5000 });
+        logger.info('📩 Auto DM queued from keyword rule', { userId, senderId });
+      }
+
+    } else {
+      reply = await generateCommentReply(
+        {
+          businessName: aiSettings.businessName || undefined,
+          businessDescription: aiSettings.businessDescription || undefined,
+          productDetails: aiSettings.productDetails || undefined,
+          targetAudience: aiSettings.targetAudience || undefined,
+          goal: aiSettings.goal,
+          tone: aiSettings.tone,
+          customInstructions: aiSettings.customInstructions || undefined,
+        },
+        commentText,
+        senderName || null,
+      );
+      logger.info('🤖 AI reply used for comment', { userId });
+    }
 
     await igService.replyToComment(commentId, reply);
 
@@ -316,7 +351,8 @@ automationQueue.process('process-comment', 3, async (job) => {
       },
     });
 
-    if (aiSettings.autoSendDMs) {
+    // Auto DM from AI settings (existing feature)
+    if (aiSettings.autoSendDMs && !keywordResult.reply) {
       await automationQueue.add('process-dm', {
         userId, senderId,
         message: `${senderName || 'Someone'} commented: "${commentText}"`,
@@ -334,6 +370,42 @@ automationQueue.process('process-comment', 3, async (job) => {
         source: 'comment', error: error.message,
       },
     });
+    throw error;
+  }
+});
+
+// ─── Process Keyword DM ───────────────────────────────────────────────────────
+automationQueue.process('process-keyword-dm', 5, async (job) => {
+  const { userId, senderId, message } = job.data;
+
+  try {
+    const igAccount = await prisma.instagramAccount.findUnique({
+      where: { userId },
+    });
+
+    if (!igAccount?.accessToken) return;
+
+    const token = igAccount.pageToken
+      ? decrypt(igAccount.pageToken)
+      : decrypt(igAccount.accessToken);
+
+    const igService = new InstagramService(token, igAccount.igUserId, igAccount.pageId);
+    await igService.sendDM(senderId, message);
+
+    await prisma.automationLog.create({
+      data: {
+        userId,
+        type: 'dm_sent',
+        status: 'success',
+        source: 'keyword',
+        igUserId: senderId,
+        response: message.substring(0, 200),
+      },
+    });
+
+    logger.info('✅ Keyword DM sent', { userId, senderId });
+  } catch (error: any) {
+    logger.error('❌ Keyword DM error:', error);
     throw error;
   }
 });
