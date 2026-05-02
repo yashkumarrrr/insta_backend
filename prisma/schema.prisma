@@ -189,3 +189,25 @@ model BillingEvent {
 
   @@map("billing_events")
 }
+
+model KeywordRule {
+  id           String   @id @default(cuid())
+  userId       String
+  mediaId      String?
+  mediaUrl     String?
+  mediaCaption String?
+  keyword      String
+  replyText    String
+  source       String   @default("both")
+  isActive     Boolean  @default(true)
+  matchType    String   @default("contains")
+  dmReplyText  String?
+  autoDM       Boolean  @default(false)
+  createdAt    DateTime @default(now())
+
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([mediaId])
+  @@map("keyword_rules")
+}
