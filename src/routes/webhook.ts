@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { Webhooks } from '@dodopayments/express';
+import crypto from 'crypto';
 import { prisma } from '../utils/prisma';
 import { logger } from '../utils/logger';
 import { automationQueue } from '../workers/automationQueue';
@@ -130,113 +130,96 @@ router.post('/instagram', async (req: Request, res: Response) => {
 // ─────────────────────────────────────────────
 // 💳 DODO PAYMENTS WEBHOOK
 // ─────────────────────────────────────────────
-router.post(
-  '/dodo',
-  Webhooks({
-    webhookKey: process.env.DODO_WEBHOOK_SECRET!,
+router.post('/dodo', async (req: Request, res: Response) => {
+  const webhookSecret = process.env.DODO_WEBHOOK_SECRET!;
+  const signature = req.headers['webhook-signature'] as string;
 
-    onPayload: async (payload: any) => {
-      logger.info(`💳 Dodo webhook event: ${payload.type}`);
-    },
+  try {
+    const hmac = crypto.createHmac('sha256', webhookSecret);
+    hmac.update(JSON.stringify(req.body));
+    const digest = hmac.digest('hex');
 
-    // Subscription activated
-    onSubscriptionActive: async (payload: any) => {
-      try {
-        const sub = payload.data;
-        const userId = sub.metadata?.userId;
-        if (!userId) return;
+    if (signature && signature !== digest) {
+      logger.warn('❌ Dodo webhook signature mismatch');
+      return res.status(400).json({ error: 'Invalid signature' });
+    }
+  } catch (err) {
+    logger.error('❌ Dodo signature verification failed:', err);
+    return res.status(400).json({ error: 'Signature verification failed' });
+  }
 
-        await prisma.user.update({
-          where: { id: userId },
-          data: {
-            stripeCustomerId: sub.customer_id,
-            stripeSubId: sub.subscription_id,
-            subStatus: 'active',
-            subPlan: 'pro',
-            isTrialActive: false,
-          },
-        });
+  const { type, data } = req.body;
+  logger.info(`💳 Dodo webhook event: ${type}`);
 
-        await prisma.billingEvent.create({
-          data: {
-            userId,
-            stripeEventId: sub.subscription_id,
-            type: 'subscription.active',
-            status: 'processed',
-          },
-        });
+  try {
+    const userId = data?.metadata?.userId;
 
-        logger.info('✅ Subscription activated for user:', userId);
-      } catch (err: any) {
-        logger.error('❌ onSubscriptionActive error:', err.message);
-      }
-    },
+    if (type === 'subscription.active' && userId) {
+      await prisma.user.update({
+        where: { id: userId },
+        data: {
+          stripeCustomerId: data.customer_id,
+          stripeSubId: data.subscription_id,
+          subStatus: 'active',
+          subPlan: 'pro',
+          isTrialActive: false,
+        },
+      });
 
-    // Subscription cancelled
-    onSubscriptionCancelled: async (payload: any) => {
-      try {
-        const sub = payload.data;
-        const userId = sub.metadata?.userId;
-        if (!userId) return;
+      await prisma.billingEvent.create({
+        data: {
+          userId,
+          stripeEventId: data.subscription_id,
+          type: 'subscription.active',
+          status: 'processed',
+        },
+      });
 
-        await prisma.user.update({
-          where: { id: userId },
-          data: { subStatus: 'cancelled', subPlan: 'free' },
-        });
+      logger.info('✅ Subscription activated for user:', userId);
+    }
 
-        await prisma.instagramAccount.updateMany({
-          where: { userId },
-          data: { automationOn: false },
-        });
+    if (type === 'subscription.cancelled' && userId) {
+      await prisma.user.update({
+        where: { id: userId },
+        data: { subStatus: 'cancelled', subPlan: 'free' },
+      });
 
-        logger.info('✅ Subscription cancelled for user:', userId);
-      } catch (err: any) {
-        logger.error('❌ onSubscriptionCancelled error:', err.message);
-      }
-    },
+      await prisma.instagramAccount.updateMany({
+        where: { userId },
+        data: { automationOn: false },
+      });
 
-    // Payment succeeded
-    onPaymentSucceeded: async (payload: any) => {
-      try {
-        const payment = payload.data;
-        const userId = payment.metadata?.userId;
-        if (!userId) return;
+      logger.info('✅ Subscription cancelled for user:', userId);
+    }
 
-        await prisma.billingEvent.create({
-          data: {
-            userId,
-            stripeEventId: payment.payment_id,
-            type: 'payment.succeeded',
-            status: 'processed',
-            amount: payment.total_amount,
-            currency: payment.currency,
-          },
-        });
+    if (type === 'payment.succeeded' && userId) {
+      await prisma.billingEvent.create({
+        data: {
+          userId,
+          stripeEventId: data.payment_id,
+          type: 'payment.succeeded',
+          status: 'processed',
+          amount: data.total_amount,
+          currency: data.currency,
+        },
+      });
 
-        logger.info('✅ Payment succeeded for user:', userId);
-      } catch (err: any) {
-        logger.error('❌ onPaymentSucceeded error:', err.message);
-      }
-    },
+      logger.info('✅ Payment succeeded for user:', userId);
+    }
 
-    // Payment failed
-    onPaymentFailed: async (payload: any) => {
-      try {
-        const payment = payload.data;
-        const userId = payment.metadata?.userId;
-        if (!userId) return;
+    if (type === 'payment.failed' && userId) {
+      await prisma.user.update({
+        where: { id: userId },
+        data: { subStatus: 'past_due' },
+      });
 
-        await prisma.user.update({
-          where: { id: userId },
-          data: { subStatus: 'past_due' },
-        });
+      logger.info('⚠️ Payment failed for user:', userId);
+    }
+  } catch (err: any) {
+    logger.error('❌ Dodo webhook processing error:', err.message);
+  }
 
-        logger.info('⚠️ Payment failed for user:', userId);
-      } catch (err: any) {
-        logger.error('❌ onPaymentFailed error:', err.message);
-      }
-    },
-  })
-);
+  res.json({ received: true });
+});
 
 export default router;
