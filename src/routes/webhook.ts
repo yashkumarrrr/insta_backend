@@ -1,11 +1,10 @@
 import { Router, Request, Response } from 'express';
-import Stripe from 'stripe';
+import { Webhooks } from '@dodopayments/express';
 import { prisma } from '../utils/prisma';
 import { logger } from '../utils/logger';
 import { automationQueue } from '../workers/automationQueue';
 
 const router = Router();
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!);
 
 // ─────────────────────────────────────────────
 // ✅ INSTAGRAM WEBHOOK VERIFY (GET)
@@ -68,11 +67,10 @@ router.post('/instagram', async (req: Request, res: Response) => {
       logger.info(`✅ IG account found: ${igAccount.id}`);
       logger.info(`📦 Raw entry: ${JSON.stringify(entry).substring(0, 800)}`);
 
-      // ADD THESE 4 LINES:
       logger.info(`📋 Changes count: ${entry.changes?.length || 0}`);
       logger.info(`📋 Messaging count: ${entry.messaging?.length || 0}`);
       for (const change of entry.changes || []) {
-       logger.info(`📋 Change field: "${change.field}", verb: "${change.value?.verb}"`);
+        logger.info(`📋 Change field: "${change.field}", verb: "${change.value?.verb}"`);
       }
 
       if (!igAccount.webhookVerified) {
@@ -86,7 +84,6 @@ router.post('/instagram', async (req: Request, res: Response) => {
       // 📩 MESSAGES (DM)
       // ─────────────────────────────
       for (const messaging of entry.messaging || []) {
-        // Skip edits, reads, reactions — only process new messages
         if (messaging.message_edit) continue;
         if (messaging.read) continue;
         if (messaging.reaction) continue;
@@ -109,9 +106,7 @@ router.post('/instagram', async (req: Request, res: Response) => {
       // 💬 COMMENTS
       // ─────────────────────────────
       for (const change of entry.changes || []) {
-        if (
-           change.field === 'comments' || change.field === 'feed'
-        ) {
+        if (change.field === 'comments' || change.field === 'feed') {
           await automationQueue.add('process-comment', {
             userId: igAccount.userId,
             igAccountId: igAccount.id,
@@ -133,107 +128,115 @@ router.post('/instagram', async (req: Request, res: Response) => {
 });
 
 // ─────────────────────────────────────────────
-// 💳 STRIPE WEBHOOK
+// 💳 DODO PAYMENTS WEBHOOK
 // ─────────────────────────────────────────────
-router.post('/stripe', async (req: Request, res: Response) => {
-  const sig = req.headers['stripe-signature'] as string;
+router.post(
+  '/dodo',
+  Webhooks({
+    webhookKey: process.env.DODO_WEBHOOK_SECRET!,
 
-  let event: Stripe.Event;
+    onPayload: async (payload: any) => {
+      logger.info(`💳 Dodo webhook event: ${payload.type}`);
+    },
 
-  try {
-    event = stripe.webhooks.constructEvent(
-      req.body,
-      sig,
-      process.env.STRIPE_WEBHOOK_SECRET!
-    );
-  } catch (err: any) {
-    logger.error('Stripe webhook signature failed:', err.message);
-    return res.status(400).send(`Webhook Error: ${err.message}`);
-  }
-
-  logger.info(`💳 Stripe event: ${event.type}`);
-
-  try {
-    switch (event.type) {
-      case 'checkout.session.completed': {
-        const session = event.data.object as Stripe.Checkout.Session;
-        const userId = session.metadata?.userId;
-        if (!userId) break;
+    // Subscription activated
+    onSubscriptionActive: async (payload: any) => {
+      try {
+        const sub = payload.data;
+        const userId = sub.metadata?.userId;
+        if (!userId) return;
 
         await prisma.user.update({
           where: { id: userId },
           data: {
-            stripeCustomerId: session.customer as string,
-            stripeSubId: session.subscription as string,
+            stripeCustomerId: sub.customer_id,
+            stripeSubId: sub.subscription_id,
             subStatus: 'active',
             subPlan: 'pro',
             isTrialActive: false,
           },
         });
-        break;
-      }
 
-      case 'customer.subscription.updated': {
-        const sub = event.data.object as Stripe.Subscription;
-        const user = await prisma.user.findFirst({
-          where: { stripeCustomerId: sub.customer as string },
+        await prisma.billingEvent.create({
+          data: {
+            userId,
+            stripeEventId: sub.subscription_id,
+            type: 'subscription.active',
+            status: 'processed',
+          },
         });
 
-        if (user) {
-          await prisma.user.update({
-            where: { id: user.id },
-            data: {
-              stripeSubId: sub.id,
-              subStatus: sub.status,
-            },
-          });
-        }
-        break;
+        logger.info('✅ Subscription activated for user:', userId);
+      } catch (err: any) {
+        logger.error('❌ onSubscriptionActive error:', err.message);
       }
+    },
 
-      case 'customer.subscription.deleted': {
-        const sub = event.data.object as Stripe.Subscription;
-        const user = await prisma.user.findFirst({
-          where: { stripeCustomerId: sub.customer as string },
+    // Subscription cancelled
+    onSubscriptionCancelled: async (payload: any) => {
+      try {
+        const sub = payload.data;
+        const userId = sub.metadata?.userId;
+        if (!userId) return;
+
+        await prisma.user.update({
+          where: { id: userId },
+          data: { subStatus: 'cancelled', subPlan: 'free' },
         });
 
-        if (user) {
-          await prisma.user.update({
-            where: { id: user.id },
-            data: {
-              subStatus: 'canceled',
-              subPlan: 'free',
-            },
-          });
-
-          await prisma.instagramAccount.updateMany({
-            where: { userId: user.id },
-            data: { automationOn: false },
-          });
-        }
-        break;
-      }
-
-      case 'invoice.payment_failed': {
-        const invoice = event.data.object as Stripe.Invoice;
-        const user = await prisma.user.findFirst({
-          where: { stripeCustomerId: invoice.customer as string },
+        await prisma.instagramAccount.updateMany({
+          where: { userId },
+          data: { automationOn: false },
         });
 
-        if (user) {
-          await prisma.user.update({
-            where: { id: user.id },
-            data: { subStatus: 'past_due' },
-          });
-        }
-        break;
+        logger.info('✅ Subscription cancelled for user:', userId);
+      } catch (err: any) {
+        logger.error('❌ onSubscriptionCancelled error:', err.message);
       }
-    }
-  } catch (err) {
-    logger.error('Stripe processing error:', err);
-  }
+    },
 
-  res.json({ received: true });
-});
+    // Payment succeeded
+    onPaymentSucceeded: async (payload: any) => {
+      try {
+        const payment = payload.data;
+        const userId = payment.metadata?.userId;
+        if (!userId) return;
+
+        await prisma.billingEvent.create({
+          data: {
+            userId,
+            stripeEventId: payment.payment_id,
+            type: 'payment.succeeded',
+            status: 'processed',
+            amount: payment.total_amount,
+            currency: payment.currency,
+          },
+        });
+
+        logger.info('✅ Payment succeeded for user:', userId);
+      } catch (err: any) {
+        logger.error('❌ onPaymentSucceeded error:', err.message);
+      }
+    },
+
+    // Payment failed
+    onPaymentFailed: async (payload: any) => {
+      try {
+        const payment = payload.data;
+        const userId = payment.metadata?.userId;
+        if (!userId) return;
+
+        await prisma.user.update({
+          where: { id: userId },
+          data: { subStatus: 'past_due' },
+        });
+
+        logger.info('⚠️ Payment failed for user:', userId);
+      } catch (err: any) {
+        logger.error('❌ onPaymentFailed error:', err.message);
+      }
+    },
+  })
+);
 
 export default router;
