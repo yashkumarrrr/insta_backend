@@ -5,7 +5,7 @@ RUN apk add --no-cache openssl
 WORKDIR /app
 
 COPY package*.json ./
-RUN npm install
+RUN npm install && npm install dodopayments @dodopayments/express
 
 COPY . .
 
