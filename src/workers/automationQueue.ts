@@ -293,6 +293,14 @@ automationQueue.process('process-dm', 5, async (job) => {
 
     logger.info('✅ DM automation completed', { userId, senderId });
   } catch (error: any) {
+    // Don't retry Meta permission errors
+    if (error.message?.includes('capability') ||
+        error.message?.includes('(#3)') ||
+        error.message?.includes('Advanced Access') ||
+        error.message?.includes('OAuthException')) {
+      logger.warn('⚠️ DM permission not approved — skipping retry', { userId });
+      return;
+    }
     logger.error('❌ DM automation error:', error);
     await prisma.automationLog.create({
       data: {
@@ -304,6 +312,7 @@ automationQueue.process('process-dm', 5, async (job) => {
     throw error;
   }
 });
+That's the only change needed in that file. Deploy and the error spam will stop.
 
 // ─── Process Comment ──────────────────────────────────────────────────────────
 automationQueue.process('process-comment', 3, async (job) => {
