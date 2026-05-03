@@ -56,6 +56,26 @@ function checkRateLimit(userId: string, type: 'dm' | 'reply', maxPerHour: number
   return true;
 }
 
+// ─── Subscription Check ───────────────────────────────────────────────────────
+async function hasActiveSubscription(userId: string): Promise<boolean> {
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: {
+      isTrialActive: true,
+      trialEndsAt: true,
+      subStatus: true,
+    },
+  });
+
+  if (!user) return false;
+
+  const now = new Date();
+  const isTrialValid = user.isTrialActive && new Date(user.trialEndsAt) > now;
+  const isSubActive = ['active', 'trialing'].includes(user.subStatus || '');
+
+  return isTrialValid || isSubActive;
+}
+
 // ─── Process DM ───────────────────────────────────────────────────────────────
 automationQueue.process('process-dm', 5, async (job) => {
   const { userId, senderId, message, messageId, isFromComment } = job.data;
@@ -63,6 +83,13 @@ automationQueue.process('process-dm', 5, async (job) => {
   logger.info('Processing DM automation', { userId, senderId });
 
   try {
+    // ─── Subscription check ───────────────────────────────────────────────
+    const subscribed = await hasActiveSubscription(userId);
+    if (!subscribed) {
+      logger.info('⛔ Subscription expired — skipping DM automation', { userId });
+      return;
+    }
+
     const [igAccount, aiSettings] = await Promise.all([
       prisma.instagramAccount.findUnique({ where: { userId } }),
       prisma.aISettings.findUnique({ where: { userId } }),
@@ -82,7 +109,9 @@ automationQueue.process('process-dm', 5, async (job) => {
 
     if (senderId === igAccount.igUserId) return;
 
-    const token = decrypt(igAccount.accessToken);
+    const token = igAccount.pageToken
+      ? decrypt(igAccount.pageToken)
+      : decrypt(igAccount.accessToken);
 
     const igService = new InstagramService(token, igAccount.igUserId, igAccount.pageId);
 
@@ -283,6 +312,13 @@ automationQueue.process('process-comment', 3, async (job) => {
   logger.info('Processing comment automation', { userId, commentId });
 
   try {
+    // ─── Subscription check ───────────────────────────────────────────────
+    const subscribed = await hasActiveSubscription(userId);
+    if (!subscribed) {
+      logger.info('⛔ Subscription expired — skipping comment automation', { userId });
+      return;
+    }
+
     const [igAccount, aiSettings] = await Promise.all([
       prisma.instagramAccount.findUnique({ where: { userId } }),
       prisma.aISettings.findUnique({ where: { userId } }),
@@ -317,6 +353,7 @@ automationQueue.process('process-comment', 3, async (job) => {
           userId,
           igAccountId,
           senderId,
+          commentId,   // ← pass commentId for Private Reply API
           message: keywordResult.dmReply,
         }, { delay: 5000 });
         logger.info('📩 Auto DM queued from keyword rule', { userId, senderId });
@@ -377,6 +414,13 @@ automationQueue.process('process-keyword-dm', 5, async (job) => {
   const { userId, senderId, message } = job.data;
 
   try {
+    // ─── Subscription check ───────────────────────────────────────────────
+    const subscribed = await hasActiveSubscription(userId);
+    if (!subscribed) {
+      logger.info('⛔ Subscription expired — skipping keyword DM', { userId });
+      return;
+    }
+
     const igAccount = await prisma.instagramAccount.findUnique({
       where: { userId },
     });
@@ -388,7 +432,16 @@ automationQueue.process('process-keyword-dm', 5, async (job) => {
       : decrypt(igAccount.accessToken);
 
     const igService = new InstagramService(token, igAccount.igUserId, igAccount.pageId);
-    await igService.sendDM(senderId, message);
+    
+    // ✅ Use Private Reply API if triggered from comment
+    // Instagram does NOT allow DM to comment user ID directly
+    // Private Reply sends a DM linked to the comment
+    if (job.data.commentId) {
+      await igService.sendPrivateReply(job.data.commentId, message);
+    } else {
+      // Regular DM reply (for DM-triggered automation)
+      await igService.sendDM(senderId, message);
+    }
 
     await prisma.automationLog.create({
       data: {
