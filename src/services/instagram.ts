@@ -130,8 +130,10 @@ export class InstagramService {
   // ─── SEND DM ─────────────────────────────────────────────────────────────
   async sendDM(recipientId: string, message: string) {
     try {
-      // ✅ MUST use igUserId (Instagram Business ID) NOT pageId (Facebook Page ID)
-      const data = await this.post(`${this.igUserId}/messages`, {
+      if (!this.pageId) {
+        throw new Error('NO_PAGE_ID: pageId is required to send DMs.');
+      }
+      const data = await this.post(`${this.pageId}/messages`, {
         recipient: { id: recipientId },
         message: { text: message },
       });
@@ -161,8 +163,11 @@ export class InstagramService {
   // This is the ONLY way to DM someone from a comment (not sendDM with user ID)
   async sendPrivateReply(commentId: string, message: string) {
     try {
-      const data = await this.post(`${this.igUserId}/messages`, {
-        recipient: { comment_id: commentId },  // ← comment_id not user id
+      if (!this.pageId) {
+        throw new Error('NO_PAGE_ID: pageId is required to send private replies.');
+      }
+      const data = await this.post(`${this.pageId}/messages`, {
+        recipient: { comment_id: commentId },
         message: { text: message },
       });
       logger.info('Private reply sent', { commentId, messageId: data.message_id });
