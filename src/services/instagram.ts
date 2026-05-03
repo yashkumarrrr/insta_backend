@@ -250,7 +250,7 @@ export class InstagramService {
       await axios.post(`${BASE_URL}/${pageId}/subscribed_apps`, null, {
         params: {
           access_token: pageToken,
-          subscribed_fields: 'messages,feed,messaging_postbacks,message_reactions,message_edits,message_reads',
+          subscribed_fields: 'messages,comments,message_reactions,message_echoes,message_reads,messaging_postbacks',
         },
       });
       logger.info('Webhooks subscribed for page', { pageId });
