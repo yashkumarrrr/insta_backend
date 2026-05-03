@@ -156,6 +156,23 @@ export class InstagramService {
     }
   }
 
+  // ─── SEND PRIVATE REPLY (DM from comment) ───────────────────────────────
+  // Instagram Private Reply API — sends a DM linked to a specific comment
+  // This is the ONLY way to DM someone from a comment (not sendDM with user ID)
+  async sendPrivateReply(commentId: string, message: string) {
+    try {
+      const data = await this.post(`${this.igUserId}/messages`, {
+        recipient: { comment_id: commentId },  // ← comment_id not user id
+        message: { text: message },
+      });
+      logger.info('Private reply sent', { commentId, messageId: data.message_id });
+      return data;
+    } catch (error: any) {
+      logger.error('Failed to send private reply', error.response?.data);
+      throw new Error(error.response?.data?.error?.message || 'Failed to send private reply');
+    }
+  }
+
   // ─── REPLY TO COMMENT ────────────────────────────────────────────────────
   async replyToComment(commentId: string, message: string) {
     try {
