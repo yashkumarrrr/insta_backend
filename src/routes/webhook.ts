@@ -110,12 +110,25 @@ router.post('/instagram', async (req: Request, res: Response) => {
       // ─────────────────────────────
       for (const change of entry.changes || []) {
         if (change.field === 'comments' || change.field === 'feed') {
+          const fromId = change.value.from?.id;
+          const isOwnComment = fromId === igAccount.igUserId || fromId === igAccount.pageId;
+          const isReply = !!change.value.parent_id;
+
+          if (isOwnComment) {
+            logger.info(`⏭️ Skipping own-account comment`, { fromId });
+            continue;
+          }
+          if (isReply) {
+            logger.info(`⏭️ Skipping reply-to-comment`, { commentId: change.value.id });
+            continue;
+          }
+
           await automationQueue.add('process-comment', {
             userId: igAccount.userId,
             igAccountId: igAccount.id,
             commentId: change.value.id,
             commentText: change.value.text,
-            senderId: change.value.from?.id,
+            senderId: fromId,
             senderName: change.value.from?.name,
             mediaId: change.value.media?.id,
             timestamp: change.value.created_time,
