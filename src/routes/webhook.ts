@@ -46,7 +46,10 @@ router.post('/instagram', async (req: Request, res: Response) => {
 
       const igAccount = await prisma.instagramAccount.findFirst({
         where: {
-          igUserId: igId,
+          OR: [
+            { igUserId: igId },
+            { pageId: igId },
+          ],
           automationOn: true,
           isActive: true,
         },
