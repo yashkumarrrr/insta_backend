@@ -124,32 +124,47 @@ Reply naturally as the business owner. Be direct and helpful. Do not tell them t
   return reply;
 }
 
+// AFTER — add reelContext param
 export async function generateCommentReply(
   context: AIReplyContext,
   comment: string,
   igUsername: string | null,
-  postCaption?: string
+  postCaption?: string,
+  reelContext?: {
+    caption?: string | null;
+    customContext?: string | null;
+    aiGoal?: string | null;
+    aiTone?: string | null;
+  } | null
 ): Promise<string> {
   const hasRealName = igUsername && isValidUsername(igUsername);
   const mention = hasRealName ? `@${igUsername}` : '';
 
-  const systemPrompt = `You are responding to a comment on your Instagram post as a business owner.
+  // Use reel-specific overrides if set, otherwise fall back to global
+  const effectiveTone = reelContext?.aiTone || context.tone;
+  const effectiveGoal = reelContext?.aiGoal || context.goal;
+  const effectiveCaption = reelContext?.caption || postCaption;
+
+  const systemPrompt = `You are responding to a comment on an Instagram post as a business owner.
 
 BUSINESS: ${context.businessName || 'My Business'}
 ${context.businessDescription ? `ABOUT: ${context.businessDescription}` : ''}
-TONE: ${TONE_GUIDES[context.tone] || TONE_GUIDES.friendly}
-GOAL: ${GOAL_GUIDES[context.goal] || GOAL_GUIDES.engagement}
+TONE: ${TONE_GUIDES[effectiveTone] || TONE_GUIDES.friendly}
+GOAL: ${GOAL_GUIDES[effectiveGoal] || GOAL_GUIDES.engagement}
+
+${reelContext?.customContext ? `REEL CONTEXT (very important — use this to give accurate replies):
+${reelContext.customContext}` : ''}
 
 Rules:
-- Reply to comments publicly (these are visible to everyone)
+- Reply based on what the reel/post is actually about — be specific, not generic
 - Be concise (1-2 sentences max)
 - Sound human and natural
-${hasRealName ? `- You may address them as ${mention} if it feels natural` : '- Do not address by name — their username is not available'}
+${hasRealName ? `- You may address them as ${mention} if it feels natural` : '- Do not address by name'}
 - Encourage further engagement
 - NEVER reveal you are AI`;
 
-  const userPrompt = postCaption
-    ? `Post caption: "${postCaption}"\n\n${hasRealName ? mention : 'Someone'} commented: "${comment}"`
+  const userPrompt = effectiveCaption
+    ? `Post caption: "${effectiveCaption}"\n\n${hasRealName ? mention : 'Someone'} commented: "${comment}"`
     : `${hasRealName ? mention : 'Someone'} commented: "${comment}"`;
 
   const response = await openai.chat.completions.create({
