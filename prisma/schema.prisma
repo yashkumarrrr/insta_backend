@@ -33,7 +33,8 @@ model User {
   automationLogs    AutomationLog[]
   billingEvents     BillingEvent[]
   keywordRules      KeywordRule[]    // ← ADD THIS LINE
-
+  // Add to User model relations:
+ reelContexts      ReelContext[]
 
   @@map("users")
 }
@@ -212,4 +213,30 @@ model KeywordRule {
   @@index([userId])
   @@index([mediaId])
   @@map("keyword_rules")
+}
+
+model ReelContext {
+  id            String   @id @default(cuid())
+  userId        String
+  mediaId       String
+  caption       String?
+  mediaType     String?
+  thumbnailUrl  String?
+  permalink     String?
+  // User writes this — "This reel is about my fitness course for beginners"
+  customContext String?
+  // Override global settings for this specific reel
+  aiGoal        String?
+  aiTone        String?
+  isActive      Boolean  @default(true)
+  cachedAt      DateTime @default(now())
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, mediaId])
+  @@index([userId])
+  @@index([mediaId])
+  @@map("reel_contexts")
 }
