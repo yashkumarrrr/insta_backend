@@ -7,11 +7,10 @@ import morgan from 'morgan';
 import { rateLimit } from 'express-rate-limit';
 import dotenv from 'dotenv';
 dotenv.config();
-
 import { logger } from './utils/logger';
 import { prisma } from './utils/prisma';
 import authRoutes from './routes/auth';
-import instagramRoutes from './routes/instagram'; // ✅ restored
+import instagramRoutes from './routes/instagram';
 import aiRoutes from './routes/ai';
 import webhookRoutes from './routes/webhook';
 import billingRoutes from './routes/billing';
@@ -19,12 +18,13 @@ import dashboardRoutes from './routes/dashboard';
 import conversationRoutes from './routes/conversations';
 import leadsRoutes from './routes/leads';
 import keywordRoutes from './routes/keywords';
+import reelContextRoutes from './routes/reelContext'; // ✅ moved import to top
 import './workers/automationQueue';
-import reelContextRoutes from './routes/reelContext';
-app.use('/api/reel-context', reelContextRoutes);
 
+// ✅ app declared BEFORE any app.use() calls
 const app = express();
 app.set('trust proxy', 1);
+
 const PORT = process.env.PORT || 4000;
 
 // Security
@@ -36,9 +36,8 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization', 'x-webhook-signature'],
 }));
 
-// Stripe needs raw body
+// Stripe needs raw body — MUST be before express.json()
 app.use('/api/webhook/stripe', express.raw({ type: 'application/json' }));
-app.use('/api/webhook/instagram', express.json());
 
 // General middleware
 app.use(compression());
@@ -59,15 +58,15 @@ app.use('/api/', globalLimiter);
 
 // Routes
 app.use('/api/auth', authRoutes);
-app.use('/api/instagram', instagramRoutes); // ✅ restored
+app.use('/api/instagram', instagramRoutes);
 app.use('/api/ai', aiRoutes);
 app.use('/api/webhook', webhookRoutes);
 app.use('/api/billing', billingRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/conversations', conversationRoutes);
 app.use('/api/leads', leadsRoutes);
-app.use('/api/keywords', keywordRoutes); // ← ADD THIS
-
+app.use('/api/keywords', keywordRoutes);
+app.use('/api/reel-context', reelContextRoutes); // ✅ moved here after app declared
 
 // Health check
 app.get('/health', (req, res) => {
