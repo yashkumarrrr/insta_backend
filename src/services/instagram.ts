@@ -231,10 +231,11 @@ export class InstagramService {
   }
 
   // ─── GET MEDIA ───────────────────────────────────────────────────────────
-  async getUserMedia(limit = 10) {
+  async getUserMedia(limit = 20) {
     try {
       const data = await this.get(`${this.igUserId}/media`, {
-        fields: 'id,caption,media_type,timestamp,comments_count,like_count',
+        // thumbnail_url is only returned for VIDEO/REEL types — safe to request for all
+        fields: 'id,caption,media_type,timestamp,comments_count,like_count,thumbnail_url,permalink,media_url',
         limit,
       });
       return data?.data ?? [];
