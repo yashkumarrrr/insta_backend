@@ -3,6 +3,7 @@ import DodoPayments from 'dodopayments';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
 import { logger } from '../utils/logger';
+import { convertReferral } from './referral';
 
 const router = Router();
 
@@ -11,7 +12,7 @@ const dodo = new DodoPayments({
   environment: (process.env.DODO_ENVIRONMENT as 'live_mode' | 'test_mode') || 'live_mode',
 });
 
-const PRODUCT_ID = process.env.DODO_PRODUCT_ID!; // Your subscription product ID from Dodo dashboard
+const PRODUCT_ID = process.env.DODO_PRODUCT_ID!;
 
 router.use(authenticate);
 
@@ -21,12 +22,13 @@ router.get('/status', async (req: AuthRequest, res: Response) => {
     const user = await prisma.user.findUnique({
       where: { id: req.user!.id },
       select: {
-        stripeCustomerId: true, // reusing this field for dodo customer id
-        stripeSubId: true,      // reusing this field for dodo subscription id
+        stripeCustomerId: true,
+        stripeSubId: true,
         subStatus: true,
         subPlan: true,
         trialEndsAt: true,
         isTrialActive: true,
+        referralCredits: true, // ← expose credit days earned
       },
     });
 
@@ -52,7 +54,6 @@ router.post('/create-checkout', async (req: AuthRequest, res: Response) => {
 
     if (!user) return res.status(404).json({ error: 'User not found' });
 
-    // Create checkout session with Dodo
     const session = await dodo.checkoutSessions.create({
       product_cart: [{ product_id: PRODUCT_ID, quantity: 1 }],
       customer: user.stripeCustomerId
@@ -85,7 +86,6 @@ router.post('/portal', async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ error: 'No billing account found' });
     }
 
-    // Dodo customer portal
     const portal = await (dodo as any).customerPortal.sessions.create({
       customer_id: user.stripeCustomerId,
       return_url: `${process.env.FRONTEND_URL}/dashboard/billing`,
@@ -122,6 +122,45 @@ router.get('/invoices', async (req: AuthRequest, res: Response) => {
     res.json(invoices);
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch invoices' });
+  }
+});
+
+// ─── POST /api/billing/webhook/dodo ──────────────────────────────────────────
+// Dodo webhook — fires when payment succeeds → convert referral reward
+router.post('/webhook/dodo', async (req: Request, res: Response) => {
+  try {
+    const event = req.body;
+    const eventType = event?.type || event?.event_type;
+
+    logger.info('Dodo webhook received', { type: eventType });
+
+    if (eventType === 'payment.succeeded' || eventType === 'subscription.active') {
+      const userId =
+        event?.data?.metadata?.userId ||
+        event?.metadata?.userId;
+
+      if (userId) {
+        // Update subscription status
+        await prisma.user.update({
+          where: { id: userId },
+          data: {
+            subStatus: 'active',
+            subPlan: 'pro',
+            isTrialActive: false,
+            stripeCustomerId: event?.data?.customer?.customer_id || undefined,
+            stripeSubId: event?.data?.subscription_id || event?.data?.payment_id || undefined,
+          },
+        }).catch(() => {}); // don't fail webhook if user update fails
+
+        // ← Convert referral and grant referrer their reward
+        await convertReferral(userId);
+      }
+    }
+
+    res.json({ received: true });
+  } catch (err: any) {
+    logger.error('Dodo webhook error', err);
+    res.status(500).json({ error: err.message });
   }
 });
 
