@@ -244,6 +244,19 @@ export class InstagramService {
     }
   }
 
+  // ─── GET SINGLE MEDIA DETAILS ─────────────────────────────────────────────
+async getMediaDetails(mediaId: string) {
+  try {
+    const data = await this.get(`${mediaId}`, {
+      fields: 'id,caption,media_type,timestamp,permalink,thumbnail_url,media_url',
+    });
+    return data;
+  } catch (error: any) {
+    logger.error('Failed to get media details', error.response?.data);
+    return null;
+  }
+}
+
   // ─── SUBSCRIBE WEBHOOKS ──────────────────────────────────────────────────
   async subscribeToWebhooks(pageId: string, pageToken: string) {
     try {
