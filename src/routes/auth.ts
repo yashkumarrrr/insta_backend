@@ -7,6 +7,7 @@ import { signAccessToken, signRefreshToken, verifyRefreshToken, signPasswordRese
 import { authenticate, AuthRequest } from '../middleware/auth';
 import { logger } from '../utils/logger';
 import { emailService } from '../services/email';
+import { applyReferralCode } from './referral';
 
 const router = Router();
 
@@ -15,6 +16,22 @@ const authLimiter = rateLimit({
   max: 10,
   message: { error: 'Too many auth attempts, please try again in 15 minutes.' },
 });
+
+// ─── Generate unique referral code ───────────────────────────────────────────
+function generateReferralCode(name: string): string {
+  const base = name.replace(/\s+/g, '').substring(0, 5).toUpperCase();
+  const rand = Math.random().toString(36).substring(2, 7).toUpperCase();
+  return `${base}${rand}`; // e.g. "RAHUL9KX2A"
+}
+
+async function getUniqueReferralCode(name: string): Promise<string> {
+  let code = generateReferralCode(name);
+  // Ensure uniqueness
+  while (await prisma.user.findUnique({ where: { referralCode: code } })) {
+    code = generateReferralCode(name);
+  }
+  return code;
+}
 
 // ─── POST /api/auth/signup ────────────────────────────────────────────────────
 router.post('/signup',
@@ -30,7 +47,8 @@ router.post('/signup',
       return res.status(400).json({ errors: errors.array() });
     }
 
-    const { email, password, name } = req.body;
+    // ref = referral code from query string or body (?ref=RAHUL9KX2A)
+    const { email, password, name, ref } = req.body;
 
     try {
       const existing = await prisma.user.findUnique({ where: { email } });
@@ -39,7 +57,8 @@ router.post('/signup',
       }
 
       const hashed = await bcrypt.hash(password, 12);
-      const trialEndsAt = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000); // 3 days
+      const trialEndsAt = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000); // 3 days base
+      const referralCode = await getUniqueReferralCode(name);
 
       const user = await prisma.user.create({
         data: {
@@ -47,6 +66,7 @@ router.post('/signup',
           password: hashed,
           name,
           trialEndsAt,
+          referralCode, // ← assign unique code on creation
           aiSettings: {
             create: {
               goal: 'engagement',
@@ -54,8 +74,13 @@ router.post('/signup',
             },
           },
         },
-        select: { id: true, email: true, name: true, trialEndsAt: true },
+        select: { id: true, email: true, name: true, trialEndsAt: true, referralCode: true },
       });
+
+      // Apply referral bonus if user came via a referral link
+      if (ref && typeof ref === 'string') {
+        await applyReferralCode(user.id, ref.trim().toUpperCase());
+      }
 
       const accessToken = signAccessToken({ userId: user.id, email: user.email });
       const refreshToken = signRefreshToken({ userId: user.id, email: user.email });
@@ -109,7 +134,6 @@ router.post('/login',
         return res.status(401).json({ error: 'Invalid email or password' });
       }
 
-      // Update trial status
       const now = new Date();
       if (user.isTrialActive && new Date(user.trialEndsAt) < now) {
         await prisma.user.update({
@@ -123,11 +147,11 @@ router.post('/login',
       const refreshToken = signRefreshToken({ userId: user.id, email: user.email });
 
       res.cookie('refresh_token', refreshToken, {
-  httpOnly: true,
-  secure: true,  // must be true when sameSite is none
-  sameSite: 'none',  // ← required for cross-domain
-  maxAge: 7 * 24 * 60 * 60 * 1000,
-});
+        httpOnly: true,
+        secure: true,
+        sameSite: 'none',
+        maxAge: 7 * 24 * 60 * 60 * 1000,
+      });
 
       const { password: _, ...safeUser } = user;
       res.json({ user: safeUser, accessToken });
@@ -168,6 +192,8 @@ router.get('/me', authenticate, async (req: AuthRequest, res: Response) => {
         trialEndsAt: true, isTrialActive: true,
         subStatus: true, subPlan: true, stripeCustomerId: true,
         createdAt: true,
+        referralCode: true,   // ← expose for frontend
+        referralCredits: true,
         instagramAccount: {
           select: {
             id: true, username: true, isActive: true,
@@ -198,7 +224,7 @@ router.post('/forgot-password',
 
       if (user) {
         const token = signPasswordResetToken(user.id);
-        const expiry = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
+        const expiry = new Date(Date.now() + 60 * 60 * 1000);
 
         await prisma.user.update({
           where: { id: user.id },
@@ -209,7 +235,6 @@ router.post('/forgot-password',
         await emailService.sendPasswordReset(email, resetUrl);
       }
 
-      // Always return success to prevent email enumeration
       res.json({ message: 'If that email exists, a reset link has been sent.' });
     } catch (error) {
       logger.error('Forgot password error:', error);
