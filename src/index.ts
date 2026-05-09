@@ -20,6 +20,8 @@ import conversationRoutes from './routes/conversations';
 import leadsRoutes from './routes/leads';
 import keywordRoutes from './routes/keywords';
 import './workers/automationQueue';
+import reelContextRoutes from './routes/reelContext';
+app.use('/api/reel-context', reelContextRoutes);
 
 const app = express();
 app.set('trust proxy', 1);
