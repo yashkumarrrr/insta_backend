@@ -1,6 +1,6 @@
-import { Router, Request, Response } from 'express';
+import { Router, Response } from 'express';
 import { prisma } from '../utils/prisma';
-import { authenticate } from '../middleware/auth';
+import { authenticate, AuthRequest } from '../middleware/auth';
 import { InstagramService } from '../services/instagram';
 import { decrypt } from '../utils/encryption';
 import { logger } from '../utils/logger';
@@ -8,10 +8,10 @@ import { logger } from '../utils/logger';
 const router = Router();
 router.use(authenticate);
 
-// GET /api/reel-context — get all reel contexts + fetch latest reels
-router.get('/', async (req: Request, res: Response) => {
+// GET /api/reel-context
+router.get('/', async (req: AuthRequest, res: Response) => {
   try {
-    const userId = (req as any).userId;
+    const userId = req.user!.id;  // ✅ correct
 
     const [reelContexts, igAccount] = await Promise.all([
       prisma.reelContext.findMany({
@@ -23,7 +23,6 @@ router.get('/', async (req: Request, res: Response) => {
 
     if (!igAccount) return res.json({ reels: [], contexts: reelContexts });
 
-    // Fetch latest reels from Instagram
     const token = igAccount.pageToken
       ? decrypt(igAccount.pageToken)
       : decrypt(igAccount.accessToken);
@@ -38,10 +37,10 @@ router.get('/', async (req: Request, res: Response) => {
   }
 });
 
-// PUT /api/reel-context/:mediaId — save or update context for a reel
-router.put('/:mediaId', async (req: Request, res: Response) => {
+// PUT /api/reel-context/:mediaId
+router.put('/:mediaId', async (req: AuthRequest, res: Response) => {
   try {
-    const userId = (req as any).userId;
+    const userId = req.user!.id;  // ✅ correct
     const { mediaId } = req.params;
     const { customContext, aiGoal, aiTone, caption, thumbnailUrl, permalink } = req.body;
 
@@ -72,14 +71,16 @@ router.put('/:mediaId', async (req: Request, res: Response) => {
   }
 });
 
-// DELETE /api/reel-context/:mediaId — remove custom context
-router.delete('/:mediaId', async (req: Request, res: Response) => {
+// DELETE /api/reel-context/:mediaId
+router.delete('/:mediaId', async (req: AuthRequest, res: Response) => {
   try {
-    const userId = (req as any).userId;
+    const userId = req.user!.id;  // ✅ correct
     const { mediaId } = req.params;
+
     await prisma.reelContext.delete({
       where: { userId_mediaId: { userId, mediaId } },
     });
+
     res.json({ success: true });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
