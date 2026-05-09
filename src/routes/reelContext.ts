@@ -11,7 +11,7 @@ router.use(authenticate);
 // GET /api/reel-context
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
-    const userId = req.user!.id;  // ✅ correct
+    const userId = req.user!.id;
 
     const [reelContexts, igAccount] = await Promise.all([
       prisma.reelContext.findMany({
@@ -23,17 +23,35 @@ router.get('/', async (req: AuthRequest, res: Response) => {
 
     if (!igAccount) return res.json({ reels: [], contexts: reelContexts });
 
-    const token = igAccount.pageToken
-      ? decrypt(igAccount.pageToken)
-      : decrypt(igAccount.accessToken);
+    // Decrypt token — prefer pageToken (needed for thumbnail_url on Reels)
+    const rawToken = igAccount.pageToken ?? igAccount.accessToken;
+    if (!rawToken) {
+      logger.warn('No access token found for user', { userId });
+      return res.json({ reels: [], contexts: reelContexts });
+    }
+
+    const token = decrypt(rawToken);
+    if (!token) {
+      logger.warn('Token decryption returned empty string', { userId });
+      return res.json({ reels: [], contexts: reelContexts });
+    }
 
     const igService = new InstagramService(token, igAccount.igUserId, igAccount.pageId);
-    const reels = await igService.getUserMedia(20);
+
+    // Fetch all media and filter to only IMAGE/VIDEO/REEL for the reel dashboard
+    const allMedia = await igService.getUserMedia(20);
+    const reels = allMedia.filter((m: any) =>
+      m.media_type === 'VIDEO' || m.media_type === 'REEL' || m.media_type === 'IMAGE'
+    );
 
     res.json({ reels, contexts: reelContexts });
   } catch (err: any) {
-    logger.error('Failed to get reel contexts', err);
-    res.status(500).json({ error: err.message });
+    logger.error('Failed to get reel contexts', {
+      message: err.message,
+      stack: err.stack,
+      fbError: err.response?.data,
+    });
+    res.status(500).json({ error: err.message || 'Failed to load reels' });
   }
 });
 
