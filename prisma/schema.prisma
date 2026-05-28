@@ -26,6 +26,11 @@ model User {
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
 
+
+  referralCode     String?         @unique
+  referralCredits  Int             @default(0)
+  referredBy       String?
+
   instagramAccount  InstagramAccount?
   aiSettings        AISettings?
   conversations     Conversation[]
@@ -239,4 +244,16 @@ model ReelContext {
   @@index([userId])
   @@index([mediaId])
   @@map("reel_contexts")
+}
+
+model ReferralEvent {
+  id         String   @id @default(cuid())
+  referrerId String
+  referredId String
+  createdAt  DateTime @default(now())
+
+  referrer   User     @relation(fields: [referrerId], references: [id], onDelete: Cascade)
+
+  @@index([referrerId])
+  @@map("referral_events")
 }
