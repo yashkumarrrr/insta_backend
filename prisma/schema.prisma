@@ -1,260 +1,253 @@
-// This is your Prisma schema file
-generator client {
-  provider = "prisma-client-js"
+import { Router, Response, Request } from 'express';
+import { prisma } from '../utils/prisma';
+import { authenticate, AuthRequest } from '../middleware/auth';
+import { logger } from '../utils/logger';
+import { emailService } from '../services/email';
+
+const router = Router();
+router.use(authenticate);
+
+// ─── How the referral system works ───────────────────────────────────────────
+// 1. Every user gets a unique referral code on signup (stored on User model)
+// 2. New user signs up with ?ref=CODE → they get +7 days trial bonus
+// 3. Referrer gets +7 days trial added (or future: credit/discount)
+// 4. ReferralEvent tracks every referral with status: pending → converted
+// 5. Converted = referred user subscribes (paid) — referrer gets reward
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ─── GET /api/referral/me ─────────────────────────────────────────────────────
+// Returns the current user's referral code, link, stats
+router.get('/me', async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user!.id;
+
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        id: true,
+        referralCode: true,
+        referralCredits: true,
+        referredBy: true,
+      },
+    });
+
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    // Count referrals
+    const [totalReferred, converted, pending] = await Promise.all([
+      prisma.referralEvent.count({ where: { referrerId: userId } }),
+      prisma.referralEvent.count({ where: { referrerId: userId, status: 'converted' } }),
+      prisma.referralEvent.count({ where: { referrerId: userId, status: 'pending' } }),
+    ]);
+
+    // Get recent referral events
+    const recentReferrals = await prisma.referralEvent.findMany({
+      where: { referrerId: userId },
+      orderBy: { createdAt: 'desc' },
+      take: 10,
+      select: {
+        id: true,
+        status: true,
+        rewardDays: true,
+        createdAt: true,
+        convertedAt: true,
+        referred: {
+          select: { name: true, email: true, createdAt: true },
+        },
+      },
+    });
+
+    const referralLink = `${process.env.FRONTEND_URL}/auth/signup?ref=${user.referralCode}`;
+
+    res.json({
+      referralCode: user.referralCode,
+      referralLink,
+      referralCredits: user.referralCredits, // total bonus days earned
+      stats: {
+        totalReferred,
+        converted,
+        pending,
+      },
+      recentReferrals,
+    });
+  } catch (err: any) {
+    logger.error('Failed to get referral info', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── GET /api/referral/leaderboard ───────────────────────────────────────────
+// Top referrers — motivates users to refer more
+router.get('/leaderboard', async (req: AuthRequest, res: Response) => {
+  try {
+    const top = await prisma.referralEvent.groupBy({
+      by: ['referrerId'],
+      _count: { referrerId: true },
+      where: { status: 'converted' },
+      orderBy: { _count: { referrerId: 'desc' } },
+      take: 10,
+    });
+
+    const enriched = await Promise.all(
+      top.map(async (entry) => {
+        const user = await prisma.user.findUnique({
+          where: { id: entry.referrerId },
+          select: { name: true },
+        });
+        return {
+          name: user?.name ? user.name.split(' ')[0] + ' ' + (user.name.split(' ')[1]?.[0] || '') + '.' : 'Anonymous',
+          conversions: entry._count.referrerId,
+        };
+      })
+    );
+
+    res.json(enriched);
+  } catch (err: any) {
+    logger.error('Leaderboard error', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── POST /api/referral/send-invite ──────────────────────────────────────────
+// User enters friend's email — we send them an invite email
+router.post('/send-invite', async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const { email } = req.body;
+
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({ error: 'Valid email required' });
+    }
+
+    // Don't invite someone already signed up
+    const existing = await prisma.user.findUnique({ where: { email } });
+    if (existing) {
+      return res.status(409).json({ error: 'This email is already registered' });
+    }
+
+    const referrer = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { name: true, referralCode: true },
+    });
+
+    if (!referrer) return res.status(404).json({ error: 'User not found' });
+
+    const referralLink = `${process.env.FRONTEND_URL}/auth/signup?ref=${referrer.referralCode}`;
+
+    await emailService.sendReferralInvite(email, referrer.name || 'Someone', referralLink);
+
+    logger.info('Referral invite sent', { from: userId, to: email });
+    res.json({ success: true, message: `Invite sent to ${email}` });
+  } catch (err: any) {
+    logger.error('Send invite error', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+export default router;
+
+// ─── EXPORTED HELPERS (used in auth.ts signup + billing webhook) ─────────────
+
+// Called during signup when ?ref=CODE is present
+export async function applyReferralCode(newUserId: string, referralCode: string) {
+  try {
+    // Find referrer by code
+    const referrer = await prisma.user.findUnique({
+      where: { referralCode },
+      select: { id: true, name: true, email: true, trialEndsAt: true, isTrialActive: true },
+    });
+
+    if (!referrer || referrer.id === newUserId) return; // invalid or self-referral
+
+    // Create the referral event
+    await prisma.referralEvent.create({
+      data: {
+        referrerId: referrer.id,
+        referredId: newUserId,
+        status: 'pending',
+        rewardDays: 7, // referrer gets 7 days when referred user converts
+      },
+    });
+
+    // Give the NEW user an immediate +7 day trial bonus
+    const newUser = await prisma.user.findUnique({
+      where: { id: newUserId },
+      select: { trialEndsAt: true },
+    });
+
+    if (newUser) {
+      const bonusTrial = new Date(newUser.trialEndsAt);
+      bonusTrial.setDate(bonusTrial.getDate() + 7);
+      await prisma.user.update({
+        where: { id: newUserId },
+        data: {
+          trialEndsAt: bonusTrial,
+          referredBy: referralCode,
+        },
+      });
+    }
+
+    // Notify referrer
+    await emailService.sendReferralPending(
+      referrer.email,
+      referrer.name || 'there',
+    );
+
+    logger.info('Referral applied', { referrerId: referrer.id, newUserId });
+  } catch (err) {
+    // Non-critical — don't break signup if referral fails
+    logger.error('applyReferralCode failed', err);
+  }
 }
 
-datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
-}
+// Called from billing webhook when referred user's payment succeeds
+export async function convertReferral(paidUserId: string) {
+  try {
+    const event = await prisma.referralEvent.findFirst({
+      where: { referredId: paidUserId, status: 'pending' },
+      include: {
+        referrer: { select: { id: true, email: true, name: true, trialEndsAt: true, isTrialActive: true } },
+      },
+    });
 
-model User {
-  id                String    @id @default(cuid())
-  email             String    @unique
-  password          String
-  name              String?
-  avatar            String?
-  trialStartedAt    DateTime  @default(now())
-  trialEndsAt       DateTime
-  isTrialActive     Boolean   @default(true)
-  stripeCustomerId  String?   @unique
-  stripeSubId       String?
-  subStatus         String?   @default("trialing")
-  subPlan           String?   @default("free")
-  resetToken        String?
-  resetTokenExpiry  DateTime?
-  createdAt         DateTime  @default(now())
-  updatedAt         DateTime  @updatedAt
+    if (!event) return;
 
+    // Mark as converted
+    await prisma.referralEvent.update({
+      where: { id: event.id },
+      data: { status: 'converted', convertedAt: new Date() },
+    });
 
-  referralCode     String?         @unique
-  referralCredits  Int             @default(0)
-  referredBy       String?
+    // Give referrer their reward: +7 days trial OR extend subscription
+    const referrer = event.referrer;
+    const bonusDays = event.rewardDays;
 
-  instagramAccount  InstagramAccount?
-  aiSettings        AISettings?
-  conversations     Conversation[]
-  leads             Lead[]
-  automationLogs    AutomationLog[]
-  billingEvents     BillingEvent[]
-  keywordRules      KeywordRule[]    // ← ADD THIS LINE
-  // Add to User model relations:
- reelContexts      ReelContext[]
- referralEvents    ReferralEvent[]
+    // Extend trial or add credit days
+    const currentExpiry = new Date(referrer.trialEndsAt);
+    const newExpiry = new Date(Math.max(currentExpiry.getTime(), Date.now()));
+    newExpiry.setDate(newExpiry.getDate() + bonusDays);
 
-  @@map("users")
-}
+    await prisma.user.update({
+      where: { id: referrer.id },
+      data: {
+        trialEndsAt: newExpiry,
+        isTrialActive: true,
+        referralCredits: { increment: bonusDays },
+      },
+    });
 
-model InstagramAccount {
-  id              String    @id @default(cuid())
-  userId          String    @unique
-  igUserId        String    @unique
-  username        String
-  accessToken     String    // encrypted
-  tokenExpiry     DateTime?
-  pageId          String?
-  pageToken       String?   // encrypted
-  isActive        Boolean   @default(true)
-  automationOn    Boolean   @default(false)
-  webhookVerified Boolean   @default(false)
-  followerCount   Int?
-  profilePicUrl   String?
-  connectedAt     DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
+    // Notify referrer of reward
+    await emailService.sendReferralConverted(
+      referrer.email,
+      referrer.name || 'there',
+      bonusDays,
+    );
 
-  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@map("instagram_accounts")
-}
-
-model AISettings {
-  id                  String   @id @default(cuid())
-  userId              String   @unique
-  businessName        String?
-  businessDescription String?
-  productDetails      String?
-  targetAudience      String?
-  goal                String   @default("engagement") // engagement | leads | sales | followers
-  tone                String   @default("friendly")   // friendly | professional | aggressive | luxury
-  customInstructions  String?
-  replyToDMs          Boolean  @default(true)
-  replyToComments     Boolean  @default(true)
-  autoSendDMs         Boolean  @default(true)
-  maxDMsPerHour       Int      @default(20)
-  maxRepliesPerHour   Int      @default(30)
-  createdAt           DateTime @default(now())
-  updatedAt           DateTime @updatedAt
-
-  user                User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@map("ai_settings")
-}
-
-model Conversation {
-  id              String    @id @default(cuid())
-  userId          String
-  igThreadId      String?   @unique
-  igUserId        String
-  igUsername      String?
-  igProfilePic    String?
-  source          String    @default("dm") // dm | comment
-  status          String    @default("active") // active | paused | closed
-  automationOn    Boolean   @default(true)
-  lastMessageAt   DateTime  @default(now())
-  messageCount    Int       @default(0)
-  aiMessageCount  Int       @default(0)
-  isLead          Boolean   @default(false)
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
-
-  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  messages        Message[]
-  lead            Lead?
-
-  @@index([userId])
-  @@index([igUserId])
-  @@map("conversations")
-}
-
-model Message {
-  id              String    @id @default(cuid())
-  conversationId  String
-  igMessageId     String?   @unique
-  direction       String    // inbound | outbound
-  senderType      String    @default("user") // user | ai | human
-  content         String
-  mediaUrl        String?
-  mediaType       String?
-  isRead          Boolean   @default(false)
-  sentAt          DateTime  @default(now())
-  deliveredAt     DateTime?
-  failedAt        DateTime?
-  retryCount      Int       @default(0)
-  metadata        Json?
-
-  conversation    Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-
-  @@index([conversationId])
-  @@map("messages")
-}
-
-model Lead {
-  id              String    @id @default(cuid())
-  userId          String
-  conversationId  String?   @unique
-  igUserId        String
-  igUsername      String?
-  igProfilePic    String?
-  name            String?
-  email           String?
-  phone           String?
-  notes           String?
-  status          String    @default("new") // new | contacted | qualified | converted | lost
-  source          String    @default("dm") // dm | comment
-  value           Float?
-  tags            String[]
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
-
-  user            User         @relation(fields: [userId], references: [id], onDelete: Cascade)
-  conversation    Conversation? @relation(fields: [conversationId], references: [id])
-
-  @@index([userId])
-  @@map("leads")
-}
-
-model AutomationLog {
-  id          String   @id @default(cuid())
-  userId      String
-  type        String   // webhook | ai_reply | dm_sent | error | rate_limit
-  status      String   @default("success") // success | failed | pending
-  source      String?  // comment | dm
-  igUserId    String?
-  messageId   String?
-  response    String?
-  error       String?
-  metadata    Json?
-  createdAt   DateTime @default(now())
-
-  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@index([userId])
-  @@index([createdAt])
-  @@map("automation_logs")
-}
-
-model BillingEvent {
-  id              String   @id @default(cuid())
-  userId          String
-  stripeEventId   String   @unique
-  type            String
-  status          String   @default("processed")
-  amount          Int?
-  currency        String?
-  metadata        Json?
-  createdAt       DateTime @default(now())
-
-  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@map("billing_events")
-}
-
-model KeywordRule {
-  id           String   @id @default(cuid())
-  userId       String
-  mediaId      String?
-  mediaUrl     String?
-  mediaCaption String?
-  keyword      String
-  replyText    String
-  source       String   @default("both")
-  isActive     Boolean  @default(true)
-  matchType    String   @default("contains")
-  dmReplyText  String?
-  autoDM       Boolean  @default(false)
-  createdAt    DateTime @default(now())
-
-  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@index([userId])
-  @@index([mediaId])
-  @@map("keyword_rules")
-}
-
-model ReelContext {
-  id            String   @id @default(cuid())
-  userId        String
-  mediaId       String
-  caption       String?
-  mediaType     String?
-  thumbnailUrl  String?
-  permalink     String?
-  // User writes this — "This reel is about my fitness course for beginners"
-  customContext String?
-  // Override global settings for this specific reel
-  aiGoal        String?
-  aiTone        String?
-  isActive      Boolean  @default(true)
-  cachedAt      DateTime @default(now())
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
-
-  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@unique([userId, mediaId])
-  @@index([userId])
-  @@index([mediaId])
-  @@map("reel_contexts")
-}
-
-model ReferralEvent {
-  id         String   @id @default(cuid())
-  referrerId String
-  referredId String
-  createdAt  DateTime @default(now())
-
-  referrer   User     @relation(fields: [referrerId], references: [id], onDelete: Cascade)
-
-  @@index([referrerId])
-  @@map("referral_events")
+    logger.info('Referral converted — reward granted', {
+      referrerId: referrer.id,
+      bonusDays,
+    });
+  } catch (err) {
+    logger.error('convertReferral failed', err);
+  }
 }
